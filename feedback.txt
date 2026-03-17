@@ -1,0 +1,141 @@
+Baseline odds (5 dice, best single 5‑die hand, no colors/mods):
+
+Pair             37.04%
+Two pair         23.15%
+Three of a kind  15.43%
+Small straight   12.35%
+Full house        3.86%
+Large straight    3.09%
+Four of a kind    1.93%
+Five of a kind    0.08%
+No score          3.09%
+With 7 dice (choose best 5, still no colors/mods):
+
+Full house       29.11%
+Small straight   20.10%
+Two pair         19.80%
+Large straight   17.40%
+Four of a kind    9.38%
+Three of a kind   3.00%
+Five of a kind    1.20%
+This means “Pair/No score” effectively disappear once you’re choosing the best 5 out of 7.
+With rerolls and Momma/Lap/Nimble, those high‑hand rates climb further.
+Balance observations
+
+Base hand scores are compressed (most best hands are 3–4 points). That makes bonus cards and color bonuses the dominant score source.
+Per‑die bonuses are huge: objective +1 per die (up to +5) already beats most base hands. Add all‑same‑color (+1) + “Who Let the Dawgs Out?” (+2 per copy) + Psychedelic (+1 per purple) and color‑focused builds can blow past hand strength.
+Duplicate‑stacking bonuses spike quickly:
+Big Dawg Energy duplicates add base straight score again for each copy (large +4, small +3).
+4 Shot Saluki duplicates add +4 per extra copy for four‑kind hands (even when counted “as five”).
+Snuggle Buddies (+2 per color pair per copy) and One Dawg Wolf Pack (+1 per solitary color per copy) can add 4–10 points on their own.
+Street Dawg mismatch: app.py awards +5 points per copy if not the score leader, but game.py still describes +1 if fewer kibbles than leader. The +5 version is a massive swing and likely dominates end‑round scoring.
+Suggested balance adjustments (pick any you like)
+
+Cap or soften per‑die bonuses: e.g., objective bonus capped at +3, or +1 total if you have ≥3 objective dice (instead of +1 per die).
+Diminishing returns on duplicates: first copy full effect, extra copies only +1 point each (or cap at 2 copies).
+Re‑scale base hand scores: e.g., Full house 4, Large straight 5, Four‑kind 6, Five‑kind 7, so hand strength matters more than flat bonuses.
+Tone down Street Dawg: align with game.py (+1) or keep +5 but only once per round and not per copy.
+Revisit small vs full house: full house is currently as common as straights in 7‑dice play but scores the same as small straight; consider bumping full house to 4 if you want it to feel special.
+Economy smoothing: kibbles are generous (4/3/2/2 with no splitting), so dog stacks happen fast. Consider reducing kibbles or raising dog cost if you want slower power growth.
+If you want, I can run a quick sim that includes color bonuses and your current dog deck to quantify expected total points per hand.
+
+
+
+Tactical Trickster Booster Pack
+
+Cats
+
+(2) Dogs best friend - Select dog card to copy for one round
+(2) Cat Tackle - Draft two dice from the dice bank to give to another player
+(2) Raccoon Cat - Steal 2 kibble from another player
+(4) Focus Cat - Change one die in your hand to count it as your objective color for this round only. 
+
+Dogs
+
+(2) Barrel Dawg -  One Pair gives +1 point
+(4) Service Dawg - a zero scoring hand gives 8 points
+(4) Tri-Tail Dawg - Three of a kind gains +1 points 
+
+Rivalry Booster Pack
+
+Cats
+
+(2) Fish bone cat - draft 1 purple dice from the dice bank
+(4) Narc cat - Remove a purple die from an opponents bag
+(4) Greedy cat - designated player must roll 1 less die next round
+
+Dogs
+
+(2) Cats best friend - Increases cat limit by +1
+(2) Alpha Dawg - Reduces the cost of a dawg card by 1 kibble
+(2) Mascot Dawg - If you are not the round leader earn +2 kibble
+(4) Golden Dawg - Shop Purhcase +1
+
+Service Animal Booster Pack
+
+Cats
+
+(4) Pummeling Puma - Block all re-rolls for opponent player next round, excluding momma cat.
+(4) Void Cat - Steal Cat card from another player's inventory
+(2) Lion-cut cat - Move a dog card in your hand to the stolen dog area
+
+Dogs
+
+(4) Scurvy Dawg - If you score 0 points gains +2 kibble
+(4) Shadow Dawg - When a cat card is used by an opponent this round, you gain a free reroll next round. 
+(2) Bull Dawg - If you reroll all dice gain an extra reroll
+
+
+Objective‑aware play
+
+Objective denial: If human’s objective color is known, target cards that reduce that color’s impact (e.g., Cat Tackle to give them off‑color dice).
+Color‑economy tracking: Track human bag color distribution and target their strongest color with disruptions.
+Shop tactics
+
+Deny key dog cards: If a shop dog massively improves the human’s build (objective color bonus, straight boosts), prioritize buying it even if not ideal for AI.
+Pre‑emptive sell: Sell weak AI dogs to purchase a denial card that blocks the human’s best path.
+Hand evaluation
+
+Counter straight draws: If human has 4‑in‑a‑row (visible), AI should buy Reservoir/Big Dawg Energy before the human does.
+Force low‑roll rounds: Use Pummeling Puma when human had a strong round last round, to swing momentum.
+Card sequencing
+
+Shadow Dawg baiting: If human has Shadow Dawg, AI avoids using low‑impact cats and saves a single high‑impact cat to trade 1 Shadow proc for big gain.
+Momma/Lap/Nimble combo: AI should chain Momma + Lap/Nimble when it has pattern‑boosting dogs (Saluki/Big Dawg Energy).
+Meta heuristics
+
+Threat index: Score human’s “threat” each round (kibbles + total score + strong dogs). Use that to bias AI cat choices.
+Win‑rate variance: If AI is behind in total score, it should pick swingy strategies (straights/5‑kind) rather than safe pairs.
+If you want me to implement these, tell me:
+
+Which behaviors you want first (pick 3–5).
+How aggressive should the AI be: mild, competitive, or ruthless?
+Do you want AI to “deny” cards in shop even if they don’t benefit it?
+
+
+
+
+Recent changes (latest session):
+
+Pit Baws: set to 1 copy in game.py; once purchased (or sold), it’s permanently removed from the dog deck and will not be forced into the shop again. Added pit_baws_consumed flag and consume_pit_baws() in app.py to enforce this.
+Personal Collection: added a new Card Shop button (personal_collection.png) that opens a full‑screen collection view with back button. Shows all cats/dogs, grayed out until bought in shop phase; colored once purchased.
+Profile tracking: added shop_collection to profile defaults and record purchases made during shop phase (including replace‑purchase flows).
+Card Shop UI: added Personal Collection button to the footer; card shop/collection screens clean up properly when returning to main menu.
+Image support: added personal_collection.png to UI loader and card shop scaling group.
+Fallback rendering: collection view now falls back to text if a card image is missing.
+Files touched:
+
+app.py (line 2969) — Steal Selected (Cat Burglar confirm).
+app.py (line 2981) — Cancel (Cat Burglar cancel).
+app.py (line 7195) — Cancel (Dog’s Best Friend picker cancel).
+app.py (line 7945) — Close (Shop overlay close).
+app.py (line 1617) — Buy (75) (card shop booster purchase button).
+app.py (line 13163) — Bank All (kibble bank).
+app.py (line 13175) — Bank None (kibble bank).
+app.py (line 13190) — Continue (kibble bank).
+Debug UI (all text‑only):
+
+If you want to re‑enable the debug UI, set:
+self.debug_enabled = True in app.py (near the other self.*_var initializations).
+
+Files updated:

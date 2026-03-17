@@ -1,0 +1,16708 @@
+import tkinter as tk
+import pygame
+import json
+from tkinter import messagebox
+import os
+import random
+import sys
+import time
+import inspect
+import ctypes
+from typing import List, Optional
+
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = None
+    ImageTk = None
+
+from game import (
+    Bag,
+    Card,
+    Die,
+    Game,
+    Player,
+    BASE_COLORS,
+    COLORS,
+    best_score,
+    build_cat_cards,
+    build_dog_cards,
+    build_dog_modifiers,
+)
+from cdad.platform.dpi import enable_windows_dpi_awareness
+from cdad.ui.widgets.tooltip import Tooltip
+
+
+class App:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Cats Dogs and Dice")
+        screen_w = max(1, self.root.winfo_screenwidth())
+        screen_h = max(1, self.root.winfo_screenheight())
+        min_w = max(800, min(1280, int(screen_w * 0.7)))
+        min_h = max(520, min(720, int(screen_h * 0.7)))
+        self.root.minsize(min(min_w, screen_w), min(min_h, screen_h))
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            if screen_w and screen_h:
+                self.root.geometry(f"{screen_w}x{screen_h}+0+0")
+        self.theme = self.build_theme()
+        self.root.configure(bg=self.theme["bg"])
+        self.root.option_add("*Button.cursor", "hand2")
+        self.app_icon = self.load_app_icon()
+        if self.app_icon:
+            try:
+                self.root.iconphoto(True, self.app_icon)
+            except tk.TclError:
+                pass
+        self.is_4k_display = screen_w >= 3840 and screen_h >= 2160
+        self.display_ui_scale = self.get_display_ui_scale(screen_w, screen_h)
+        self.card_asset_scale = self.get_4k_asset_boost("card")
+        self.roll_asset_scale = self.get_4k_asset_boost("roll")
+        self.ui_zoom_scale = self.detect_ui_zoom_scale()
+        self.ui_density = self.build_ui_density_profile(self.ui_zoom_scale)
+        self.shop_card_dim = max(
+            96,
+            int(
+                140
+                * self.display_ui_scale
+                * self.density("shop_card_dim_scale", 1.0)
+                * self.card_asset_scale
+            ),
+        )
+        self.card_picker_dim = int(self.shop_card_dim * 0.65)
+        self.card_images_picker = {}
+        self.card_images_picker_gray = {}
+        self.loading_frame = None
+        self.loading_canvas = None
+        self.loading_arc = None
+        self._set_loading_progress(0.0)
+        self.root.update_idletasks()
+        self.root.update()
+        self._layout_refresh_job = None
+        self.root.bind("<Configure>", self.on_root_configure, add="+")
+
+        self.game: Game | None = None
+        self.players: List[Player] = []
+        self.scores_this_round: List[tuple[Player, object]] = []
+        self.shop_player_index = 0
+        self.shop_order: List[int] = []
+        self.round_start_index = 0
+        self.first_player_frame = None
+        self.first_player_labels = {}
+        self.first_roll_candidates = []
+        self.first_roll_message = None
+        self.first_roll_button = None
+        self.first_continue_button = None
+        self.first_rolls = {}
+        self._init_asset_placeholders()
+        self.team_jibby_image = self.load_team_jibby_image()
+        self.assets_loaded = False
+        self._build_splash_ui()
+        self._build_loading_ui()
+        self.roll_channel = None
+        self.shop_channel = None
+        self.jumble_channel = None
+        self.main_theme_channel = None
+        self.roll_palette = None
+        self.roll_sound_active = False
+        self.shop_sound_active = False
+        self.jumble_sound_active = False
+        self.main_theme_active = False
+        self.rolling_canvas = None
+        self.rolling_items = []
+        self.rolling_images = []
+        self.roll_anim_start_time = 0.0
+        self.roll_anim_duration = 0.8
+        self.roll_anim_targets = []
+        self.roll_anim_starts = []
+        self.roll_anim_origin = None
+        self.roll_anim_canvas_size = None
+        self.roll_bag_origin = None
+        self.main_theme_volume_scale = 0.45
+        self.mute_var = tk.BooleanVar(value=False)
+        self.speed_var = tk.BooleanVar(value=False)
+        self.debug_enabled = True
+        self.debug_var = tk.BooleanVar(value=False)
+        self.layout_debug_var = tk.BooleanVar(value=False)
+        self.debug_theme_depth = None
+        self.depth_theme_enabled = False
+        self.volume_var = tk.IntVar(value=100)
+        self.apply_volume()
+        self.root.bind_all("<Button-1>", self.handle_ui_click_sound, add="+")
+        self.root.bind_all("<Button-1>", self.handle_dogs_best_friend_global_click, add="+")
+        self.debug_picker_windows = {}
+        self.debug_picker_target_vars = {}
+        self.profile_data = None
+        self.dog_card_widgets = []
+        self.profile_path = None
+        self.profile_player_name = None
+        self.kibble_bank_frame = None
+        self.kibble_bank_action = None
+        self.kibble_bank_amount_var = None
+        self.card_shop_frame = None
+        self.card_shop_picker_frame = None
+        self.card_shop_selected_booster = None
+        self.personal_collection_frame = None
+        self.shop_memory = {"cats": [], "dogs": []}
+        self.pending_ai_shop_toast = None
+        self.ai_shop_thinking = False
+        self.ai_shop_thinking_job = None
+        self.ai_shop_thinking_player = None
+        self.ai_shop_buy_pending = False
+        self.ai_hand_cycle_active = False
+        self.ai_hand_cycle_job = None
+        self.ai_hand_cycle_index = 0
+        self.ai_hand_cycle_slots: list[tk.Label] = []
+        self.ai_hand_blink_job = None
+        self.ai_hand_blink_label = None
+        self.ai_hand_blink_visible = False
+        self.ai_hand_blink_remaining = 0
+        self.shop_card_widgets: dict[str, dict[int, dict]] = {"cat": {}, "dog": {}}
+        self.shop_hand_slots: dict[str, dict[int, tk.Label]] = {"cat": {}, "dog": {}}
+        self.achievement_list = [
+            "Grand Poohbah",
+            "Big Dawg",
+            "Veteran Dawg",
+            "Royal Swiper",
+            "Bag of Coin",
+            "Bag of Riches",
+            "Royal Synergy",
+            "Smarty Cat",
+            "Cat from on high",
+            "Rolling",
+            "Rolling loud",
+            "Mutli-flavored-schlogy",
+            "Bag of holding",
+            "Light Packer",
+            "Ultra light packer",
+            "Royal Kibbler",
+            "Has cloning gone too far?",
+        ]
+        self.achievement_desc = {
+            "Big Dawg": "Win 5 games.",
+            "Veteran Dawg": "Win 10 games.",
+            "Royal Swiper": "Steal 5 dawgs from other players.",
+            "Bag of Coin": "Achieve a 20-point hand or higher.",
+            "Bag of Riches": "Achieve a 30-point hand or higher.",
+            "Royal Synergy": "Achieve a 35+ point hand or higher.",
+            "Smarty Cat": "Score 100 or more points in one game.",
+            "Cat from on high": "Score 160 or more points in one game.",
+            "Rolling": "Roll dice of all the same color (including purple).",
+            "Rolling loud": "Roll all purple dice.",
+            "Mutli-flavored-schlogy": "All unique colors including purple in one roll.",
+            "Bag of holding": "Carry a bag of more than 24 dice.",
+            "Light Packer": "Carry a bag of less than 14 dice.",
+            "Ultra light packer": "Carry a bag of less than 10 dice.",
+            "Royal Kibbler": "Hold 25 or more kibble.",
+            "Has cloning gone too far?": "Carry 4 of the same dog card.",
+            "Grand Poohbah": "Collect all achievements.",
+        }
+        self.pending_cat_purchase = None
+        self.pending_dog_purchase = None
+        self.pending_cat_sale = None
+        self.pending_dog_sale = None
+        self.round_history = []
+        self.scorecard_visible = False
+        self.in_shop = False
+        self.pit_baws_consumed = False
+        self.nimble_selecting = False
+        self.nimble_pending_card = None
+        self.devil_selecting = False
+        self.devil_pending_card = None
+        self.hand_revealed = False
+        self.auto_sorted_on_zero = False
+        self.scoring_highlight_indices = set()
+        self.momma_pending = 0
+        self.momma_uses = 0
+        self.shop_layout_active = False
+        self.game_layout_active = True
+        self.dice_bank_active = False
+        self.dice_bank_player = None
+        self.dice_bank_return_to_shop = False
+        self.dice_bank_card = None
+        self.dice_bank_selection = {c: 0 for c in BASE_COLORS}
+        self.bag_view_active = False
+        self.bag_view_return_to_shop = False
+        self.bag_view_dice_labels = []
+        self.bag_view_mode = "view"
+        self.bag_view_player = None
+        self.bag_view_actor = None
+        self.bag_view_card = None
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.bag_view_target_var = None
+        self.cat_burglar_active = False
+        self.cat_burglar_player = None
+        self.cat_burglar_card = None
+        self.cat_burglar_selected = None
+        self.cat_burglar_buttons = []
+        self.territorial_active = False
+        self.territorial_player = None
+        self.territorial_card = None
+        self.territorial_selected = None
+        self.territorial_buttons = []
+        self.dogs_best_friend_active = False
+        self.dogs_best_friend_player = None
+        self.dogs_best_friend_card = None
+        self.dogs_best_friend_ignore_cancel = False
+        self.dogs_best_friend_picker = None
+        self.raccoon_active = False
+        self.raccoon_player = None
+        self.raccoon_card = None
+        self.focus_selecting = False
+        self.focus_pending_card = None
+        self.focus_pending_player = None
+        self.greedy_active = False
+        self.greedy_player = None
+        self.greedy_card = None
+        self.pummeling_active = False
+        self.pummeling_player = None
+        self.pummeling_card = None
+        self.void_cat_active = False
+        self.void_cat_player = None
+        self.void_cat_card = None
+        self.lioncut_active = False
+        self.lioncut_player = None
+        self.lioncut_card = None
+        self.squirrel_active = False
+        self.squirrel_player = None
+        self.squirrel_card = None
+        self.schrodinger_pending = None
+        self.schrodinger_resolution = None
+        self.thief_night_active = False
+        self.thief_night_player = None
+        self.thief_night_card = None
+        self.rulebook_visible = False
+        self.bonus_points_by_player = {}
+        self.end_game_active = False
+        self.rolling_active = False
+        self.rolling_job = None
+        self.rolling_end_time = 0.0
+        self.rolling_indices = set()
+        self.rolling_all = False
+        self.roll_finish_callback = None
+        self.rolling_labels = []
+        self.log_window = None
+        self.log_window_text = None
+        self.log_history = []
+        self.log_panel_frame = None
+        self.log_panel_text = None
+        self.shop_flip_targets = set()
+        self.shop_header_label = None
+        self.shop_header_job = None
+        self.shop_body_inner = None
+        self.shop_reshuffle_notified = {"cat": False, "dog": False}
+        self.achievement_panel = None
+        self.achievement_listbox = None
+        self.achievement_popup = None
+        self.achievement_canvas = None
+        self.achievement_scrollbar = None
+        self.achievement_icon_frame = None
+        self.achievement_canvas_window = None
+        self.debug_window = None
+        self.debug_ignore_limits = False
+        self.layout_debug_enabled = False
+        self.layout_debug_job = None
+        self.layout_debug_markers = []
+        self.layout_debug_summary = None
+        self.pause_menu_frame = None
+        self.pause_menu_visible = False
+        self.pause_menu_panel = None
+        self.pause_options_frame = None
+        self.pause_audio_frame = None
+        self.pause_video_frame = None
+        self.pause_achievements_frame = None
+        self.turn_banner_job = None
+        self.turn_flash_job = None
+        self.turn_flash_on = False
+        self.turn_banner_key = None
+        self.turn_banner_toast = None
+        self.nimble_toast = None
+        self.devil_toast = None
+        self.score_toast = None
+        self.toast_log = []
+        self.toast_log_frame = None
+        self.toast_slots = {}
+        self.score_confirm_pending = False
+        self.jumble_bag_label = None
+        self.jumble_bag_holder = None
+        self.jumble_shake_job = None
+        self.jumble_shake_phase = 0
+        self.shop_bottom_restore = None
+        self.show_hand_info = False
+        self.hand_info_by_player = {}
+        self.compact_player_panels = True
+        self.carousel_player_index = 1
+        self.carousel_locked = False
+        self.log_panel_visible = False
+        self.scorecard_panel_visible = False
+        self.scorecard_panel_frame = None
+        self.scorecard_panel_text = None
+
+        self.loading_tasks = self._build_asset_tasks()
+        self.loading_total = max(1, len(self.loading_tasks))
+        self.loading_index = 0
+        self.root.after(10, self._load_assets_step)
+
+    def build_theme(self):
+        return {
+            "bg": "#f5efe6",
+            "panel": "#fff7ee",
+            "panel_dark": "#efe4d6",
+            "shop_bg": "#e8b88a",
+            "accent": "#c46a3b",
+            "text": "#3b2f2a",
+            "muted": "#6b5f55",
+            "border": "#d6c4b5",
+            "btn": "#e9d8c7",
+            "btn_text": "#3b2f2a",
+            "btn_active": "#d9c6b3",
+            "header_font": ("Georgia", 18, "bold"),
+            "subheader_font": ("Georgia", 12, "bold"),
+            "body_font": ("Georgia", 11),
+            "splash_font": ("Georgia", 28, "bold"),
+            "small_font": ("Georgia", 9),
+            "score_highlight": "#4f8a5b",
+        }
+
+    def detect_ui_zoom_scale(self) -> float:
+        if os.name == "nt":
+            try:
+                dpi = ctypes.windll.user32.GetDpiForWindow(self.root.winfo_id())
+                if dpi and dpi > 0:
+                    return max(1.0, dpi / 96.0)
+            except Exception:
+                pass
+        try:
+            scaling = float(self.root.tk.call("tk", "scaling"))
+            if scaling > 0:
+                return max(1.0, scaling / 1.3333333333)
+        except Exception:
+            pass
+        return 1.0
+
+    def get_display_ui_scale(self, screen_w: int, screen_h: int) -> float:
+        base_scale = min(screen_w / 1920.0, screen_h / 1080.0)
+        # Treat 1440p as the upper UI-size target so 4K keeps the same visual sizing.
+        base_scale = max(1.0, min(1.25, base_scale))
+        return round(base_scale * 4) / 4
+
+    def get_4k_asset_boost(self, asset_group: str) -> float:
+        if not getattr(self, "is_4k_display", False):
+            return 1.0
+        if asset_group in {"card", "roll"}:
+            return 1.25
+        return 1.0
+
+    def build_ui_density_profile(self, zoom_scale: float) -> dict:
+        if zoom_scale >= 1.7:
+            return {
+                "shop_card_dim_scale": 0.72,
+                "hand_die_variant": "tiny",
+                "roll_section_pady": 2,
+                "shop_relwidth": 0.98,
+                "shop_card_gap": 8,
+                "shop_card_padx": 3,
+                "shop_card_pady": 2,
+                "shop_side_reserve": 24,
+                "shop_cols_bonus": 1,
+                "end_rank_scale": 0.5,
+                "end_rank_padx": 6,
+                "end_text_height": 12,
+            }
+        if zoom_scale >= 1.45:
+            return {
+                "shop_card_dim_scale": 0.82,
+                "hand_die_variant": "small",
+                "roll_section_pady": 3,
+                "shop_relwidth": 0.96,
+                "shop_card_gap": 10,
+                "shop_card_padx": 4,
+                "shop_card_pady": 3,
+                "shop_side_reserve": 32,
+                "shop_cols_bonus": 1,
+                "end_rank_scale": 0.75,
+                "end_rank_padx": 8,
+                "end_text_height": 14,
+            }
+        if zoom_scale >= 1.2:
+            return {
+                "shop_card_dim_scale": 0.9,
+                "hand_die_variant": "small",
+                "roll_section_pady": 4,
+                "shop_relwidth": 0.94,
+                "shop_card_gap": 12,
+                "shop_card_padx": 5,
+                "shop_card_pady": 4,
+                "shop_side_reserve": 36,
+                "shop_cols_bonus": 0,
+                "end_rank_scale": 0.75,
+                "end_rank_padx": 10,
+                "end_text_height": 16,
+            }
+        return {
+            "shop_card_dim_scale": 1.0,
+            "hand_die_variant": "full",
+            "roll_section_pady": 5,
+            "shop_relwidth": 0.92,
+            "shop_card_gap": 12,
+            "shop_card_padx": 6,
+            "shop_card_pady": 4,
+            "shop_side_reserve": 40,
+            "shop_cols_bonus": 0,
+            "end_rank_scale": 1.0,
+            "end_rank_padx": 12,
+            "end_text_height": 18,
+        }
+
+    def density(self, key: str, default=None):
+        return self.ui_density.get(key, default)
+
+    def scale_ui_percent(self, percent: float) -> float:
+        return percent * self.display_ui_scale
+
+    def get_roll_section_pady(self) -> int:
+        return max(2, int(self.density("roll_section_pady", 5)))
+
+    def get_active_die_variant(self) -> str:
+        variant = self.density("hand_die_variant", "full")
+        width = self.hand_frame.winfo_width() if hasattr(self, "hand_frame") and self.hand_frame.winfo_exists() else self.root.winfo_width()
+        if width and width < 760 and variant == "full":
+            variant = "small"
+        if width and width < 620:
+            variant = "tiny"
+        return variant
+
+    def get_active_die_image_map(self) -> dict:
+        variant = self.get_active_die_variant()
+        if variant == "tiny":
+            return self.dice_images_tiny or self.dice_images_small or self.dice_images
+        if variant == "small":
+            return self.dice_images_small or self.dice_images
+        return self.dice_images
+
+    def get_active_gray_die_image_map(self) -> dict:
+        variant = self.get_active_die_variant()
+        if variant == "tiny":
+            cache_name = "dice_images_gray_tiny"
+            base_images = self.dice_images_tiny or self.dice_images_small or self.dice_images
+        elif variant == "small":
+            cache_name = "dice_images_gray_small"
+            base_images = self.dice_images_small or self.dice_images
+        else:
+            return self.dice_images_gray
+        cache = getattr(self, cache_name, None)
+        if not cache:
+            cache = self.build_grayscale_dice_images(base_images)
+            setattr(self, cache_name, cache)
+        return cache
+
+    def get_display_purple_wild_image(self) -> tk.PhotoImage | None:
+        if not self.purple_wild_image:
+            return None
+        images = self.get_active_die_image_map()
+        sample = None
+        if images.get("purple"):
+            sample = next(iter(images["purple"].values()), None)
+        if not sample:
+            return self.purple_wild_image
+        cache = getattr(self, "purple_wild_variant_cache", None)
+        if cache is None:
+            cache = {}
+            self.purple_wild_variant_cache = cache
+        key = (sample.width(), sample.height())
+        if key not in cache:
+            cache[key] = self.scale_image_to_fit(self.purple_wild_image, sample.width(), sample.height()) or self.purple_wild_image
+        return cache[key]
+
+    def get_shop_layout_metrics(self) -> dict:
+        width = self.shop_frame.winfo_width() if getattr(self, "shop_frame", None) and self.shop_frame.winfo_exists() else self.root.winfo_width()
+        cols_bonus = int(self.density("shop_cols_bonus", 0))
+        if width < 1200:
+            cols_bonus += 1
+        if width < 940:
+            cols_bonus += 1
+        return {
+            "card_gap": max(6, int(self.density("shop_card_gap", 12))),
+            "card_padx": max(2, int(self.density("shop_card_padx", 6))),
+            "card_pady": max(2, int(self.density("shop_card_pady", 4))),
+            "side_reserve": max(20, int(self.density("shop_side_reserve", 40))),
+            "cols_bonus": cols_bonus,
+            "relwidth": max(0.9, min(0.99, float(self.density("shop_relwidth", 0.92)))),
+        }
+
+    def get_roll_phase_palette(self, depth: int) -> dict:
+        depth = max(0, min(12, int(depth)))
+        palettes = {
+            1: {
+                "bg": "#f7efe8",
+                "panel": "#fff5ee",
+                "panel_dark": "#f0e2d7",
+                "accent": "#d17a5d",
+            },
+            2: {
+                "bg": "#eef5fb",
+                "panel": "#f6fbff",
+                "panel_dark": "#e3eef9",
+                "accent": "#4b7fb8",
+            },
+            3: {
+                "bg": "#eef9f0",
+                "panel": "#f6fff7",
+                "panel_dark": "#e0f2e4",
+                "accent": "#4a8a5b",
+            },
+            4: {
+                "bg": "#f8f4e8",
+                "panel": "#fff9ed",
+                "panel_dark": "#efe6d1",
+                "accent": "#b88a3c",
+            },
+            5: {
+                "bg": "#f4f0fb",
+                "panel": "#faf6ff",
+                "panel_dark": "#e9e0f5",
+                "accent": "#7d5bb3",
+            },
+            6: {
+                "bg": "#eaf6f6",
+                "panel": "#f3fefe",
+                "panel_dark": "#dcefed",
+                "accent": "#3d8a84",
+            },
+            7: {
+                "bg": "#f7edf1",
+                "panel": "#fff5f8",
+                "panel_dark": "#f0dfe6",
+                "accent": "#b35d7a",
+            },
+            8: {
+                "bg": "#f1f4eb",
+                "panel": "#f8fbf2",
+                "panel_dark": "#e3e9d6",
+                "accent": "#6a8a4a",
+            },
+            9: {
+                "bg": "#eef1fb",
+                "panel": "#f6f7ff",
+                "panel_dark": "#e0e5f5",
+                "accent": "#5b6fb3",
+            },
+            10: {
+                "bg": "#12081f",
+                "panel": "#2b0f4d",
+                "panel_dark": "#0a0414",
+                "accent": "#ff4fd8",
+                "text": "#f7ecff",
+                "muted": "#c9b1e6",
+                "border": "#4a2a6f",
+                "btn": "#2c114a",
+                "btn_text": "#f7ecff",
+                "btn_active": "#3a1761",
+            },
+            11: {
+                "bg": "#061b22",
+                "panel": "#0f3141",
+                "panel_dark": "#030f14",
+                "accent": "#5affc7",
+                "text": "#e8fffb",
+                "muted": "#a1d7cf",
+                "border": "#2a6c74",
+                "btn": "#103646",
+                "btn_text": "#e8fffb",
+                "btn_active": "#154a5c",
+            },
+            12: {
+                "bg": "#2a0f14",
+                "panel": "#4a1b21",
+                "panel_dark": "#15070a",
+                "accent": "#ffd15a",
+                "text": "#fff0d9",
+                "muted": "#e1c2a1",
+                "border": "#6f2a36",
+                "btn": "#4b1e25",
+                "btn_text": "#fff0d9",
+                "btn_active": "#622530",
+            },
+        }
+        return palettes.get(depth, {})
+
+    def roll_color(self, key: str) -> str:
+        palette = self.roll_palette or {}
+        if key in palette:
+            return palette[key]
+        return self.theme.get(key, "#000000")
+
+    def create_image_slider(
+        self,
+        parent: tk.Widget,
+        variable: tk.IntVar,
+        from_: int,
+        to: int,
+        length: int = 220,
+        bg: str | None = None,
+        fg: str | None = None,
+        on_change=None,
+        show_value: bool = True,
+    ) -> tk.Frame:
+        bg = bg or self.theme["panel_dark"]
+        fg = fg or self.theme["text"]
+        container = tk.Frame(parent, bg=bg)
+        row = tk.Frame(container, bg=bg)
+        row.pack(anchor="w")
+        value_label = None
+        if show_value:
+            value_label = tk.Label(
+                row,
+                text=str(variable.get()),
+                font=self.theme["body_font"],
+                bg=bg,
+                fg=fg,
+            )
+            value_label.pack(side="left", padx=(0, 6))
+
+        track = self.ui_images.get("slider_track")
+        knob = self.ui_images.get("slider_knob")
+        if track:
+            track = self.scale_image_percent(track, self.scale_ui_percent(0.25))
+        if knob:
+            knob = self.scale_image_percent(knob, self.scale_ui_percent(0.25))
+        track_w = track.width() if track else length
+        track_h = track.height() if track else 22
+        knob_w = knob.width() if knob else 16
+        knob_h = knob.height() if knob else 16
+        canvas = tk.Canvas(
+            row,
+            width=track_w,
+            height=max(track_h, knob_h) + 10,
+            bg=bg,
+            highlightthickness=0,
+        )
+        canvas.track_image = track
+        canvas.knob_image = knob
+        canvas.pack(side="left")
+        if track:
+            canvas.create_image(track_w // 2, (max(track_h, knob_h) // 2) + 2, image=track)
+        else:
+            canvas.create_line(
+                8,
+                (max(track_h, knob_h) // 2) + 2,
+                track_w - 8,
+                (max(track_h, knob_h) // 2) + 2,
+                fill=self.theme["border"],
+                width=4,
+                capstyle="round",
+            )
+        knob_id = canvas.create_image(0, 0, image=knob) if knob else canvas.create_oval(
+            0, 0, knob_w, knob_h, fill=self.theme["accent"], outline=""
+        )
+        if knob:
+            canvas.itemconfig(knob_id, image=knob)
+        min_x = 8 + knob_w // 2
+        max_x = track_w - 8 - knob_w // 2
+        center_y = (max(track_h, knob_h) // 2) + 2
+
+        def value_to_x(value: int) -> int:
+            if to <= from_ or max_x <= min_x:
+                return min_x
+            ratio = max(0.0, min(1.0, (value - from_) / (to - from_)))
+            return int(min_x + (max_x - min_x) * ratio)
+
+        def x_to_value(x: int) -> int:
+            if to <= from_ or max_x <= min_x:
+                return from_
+            ratio = max(0.0, min(1.0, (x - min_x) / (max_x - min_x)))
+            return int(round(from_ + ratio * (to - from_)))
+
+        def update_knob() -> None:
+            x = value_to_x(int(variable.get()))
+            canvas.coords(knob_id, x, center_y)
+            if value_label:
+                value_label.config(text=str(variable.get()))
+
+        def set_value_from_event(event) -> None:
+            new_val = x_to_value(event.x)
+            variable.set(new_val)
+            update_knob()
+            if on_change:
+                on_change(new_val)
+
+        canvas.bind("<Button-1>", set_value_from_event)
+        canvas.bind("<B1-Motion>", set_value_from_event)
+        variable.trace_add("write", lambda *_: update_knob())
+        update_knob()
+        return container
+
+    def apply_roll_phase_theme(self) -> None:
+        if not self.depth_theme_enabled:
+            self.roll_palette = {}
+        else:
+            depth = (
+                self.debug_theme_depth
+                if self.debug_theme_depth is not None
+                else getattr(self, "game_depth", 0)
+            )
+            self.roll_palette = self.get_roll_phase_palette(depth)
+        panel_dark = self.roll_color("panel_dark")
+        panel = self.roll_color("panel")
+        text = self.roll_color("text")
+        muted = self.roll_color("muted")
+        btn_bg = self.roll_color("btn") if self.roll_palette and "btn" in self.roll_palette else panel_dark
+        btn_active = (
+            self.roll_color("btn_active")
+            if self.roll_palette and "btn_active" in self.roll_palette
+            else panel_dark
+        )
+
+        for widget in (
+            self.center_frame,
+            self.top_area,
+            self.hand_frame,
+            self.controls_frame,
+            self.controls_row,
+            self.controls_row_secondary,
+            self.cat_frame,
+        ):
+            self.safe_config(widget, bg=panel_dark)
+        self.safe_config(self.info_label, bg=panel_dark, fg=text)
+        self.safe_config(self.status_label, bg=panel_dark, fg=muted)
+        for widget in (
+            self.reroll_button,
+            self.end_turn_button,
+            self.bag_button,
+            self.scorecard_button,
+            getattr(self, "sort_button", None),
+            getattr(self, "nimble_button", None),
+            getattr(self, "view_hands_button", None),
+            getattr(self, "hide_hands_button", None),
+        ):
+            if widget:
+                self.safe_config(
+                    widget,
+                    bg=btn_bg,
+                    activebackground=btn_active,
+                )
+        for frame in (
+            getattr(self, "cat_buttons_frame", None),
+        ):
+            if frame:
+                self.safe_config(frame, bg=panel_dark)
+        self.safe_config(self.center_frame, bg=panel_dark)
+        self.safe_config(getattr(self, "bottom_panel_container", None), bg=panel)
+        self.show_roll_border()
+
+    def show_roll_border(self) -> None:
+        if not Image or not ImageTk:
+            return
+        if not self.roll_border_pil:
+            return
+        parent = getattr(self, "table_frame", None)
+        if not parent or not parent.winfo_exists():
+            parent = getattr(self, "main_frame", None)
+        if not parent or not parent.winfo_exists():
+            parent = self.root
+
+        img_w, img_h = self.roll_border_pil.size
+        base_thickness = max(1, int(min(img_w, img_h) * 0.06))
+        top_crop = self.roll_border_pil.crop((0, 0, img_w, base_thickness))
+        bottom_crop = self.roll_border_pil.crop((0, img_h - base_thickness, img_w, img_h))
+        inner_h = max(1, img_h - (2 * base_thickness))
+        if inner_h > 1:
+            left_crop = self.roll_border_pil.crop((0, base_thickness, base_thickness, img_h - base_thickness))
+            right_crop = self.roll_border_pil.crop((img_w - base_thickness, base_thickness, img_w, img_h - base_thickness))
+        else:
+            left_crop = self.roll_border_pil.crop((0, 0, base_thickness, img_h))
+            right_crop = self.roll_border_pil.crop((img_w - base_thickness, 0, img_w, img_h))
+
+        def ensure_slice(key: str):
+            entry = self.roll_border_slices.get(key)
+            label = entry["label"] if entry and entry.get("label") and entry["label"].winfo_exists() else None
+            if label and label.master is not parent:
+                try:
+                    label.destroy()
+                except tk.TclError:
+                    pass
+                label = None
+            if not label:
+                label = tk.Label(parent, bd=0, bg=self.theme["bg"], highlightthickness=0)
+                self.roll_border_slices[key] = {"label": label, "image": None}
+            return label
+
+        try:
+            parent.update_idletasks()
+            width = max(1, parent.winfo_width())
+            height = max(1, parent.winfo_height())
+        except Exception:
+            return
+        scale = min(width / img_w, height / img_h)
+        thickness = max(1, int(base_thickness * scale))
+        thickness = min(thickness, max(1, min(width, height) // 3))
+        side_h = max(1, height - (2 * thickness))
+        try:
+            top_img = ImageTk.PhotoImage(top_crop.resize((width, thickness), Image.LANCZOS))
+            bottom_img = ImageTk.PhotoImage(bottom_crop.resize((width, thickness), Image.LANCZOS))
+            left_img = ImageTk.PhotoImage(left_crop.resize((thickness, side_h), Image.LANCZOS))
+            right_img = ImageTk.PhotoImage(right_crop.resize((thickness, side_h), Image.LANCZOS))
+        except Exception:
+            return
+        slices = {
+            "screen_top": (top_img, 0, 0, width, thickness),
+            "screen_bottom": (bottom_img, 0, height - thickness, width, thickness),
+            "screen_left": (left_img, 0, thickness, thickness, side_h),
+            "screen_right": (right_img, width - thickness, thickness, thickness, side_h),
+        }
+        for key, (img, x, y, w, h) in slices.items():
+            label = ensure_slice(key)
+            label.configure(image=img)
+            label.image = img
+            label.place(x=x, y=y, width=w, height=h)
+            try:
+                label.lift()
+            except tk.TclError:
+                pass
+        if hasattr(self, "table_frame") and self.table_frame and self.table_frame.winfo_exists():
+            try:
+                self.table_frame.configure(padx=thickness, pady=thickness)
+            except tk.TclError:
+                pass
+        if getattr(self, "debug_enabled", False):
+            try:
+                children = []
+                for child in parent.winfo_children():
+                    info = f"{child.winfo_class()}:{child.winfo_name()}"
+                    children.append(info)
+                print(
+                    "[Border] parent=",
+                    parent.winfo_name(),
+                    "padx=",
+                    parent.cget("padx"),
+                    "pady=",
+                    parent.cget("pady"),
+                    "children(top->bottom)=",
+                    list(reversed(children)),
+                )
+            except tk.TclError:
+                pass
+
+    def hide_roll_border(self) -> None:
+        if self.roll_border_label and self.roll_border_label.winfo_exists():
+            try:
+                self.roll_border_label.place_forget()
+            except tk.TclError:
+                pass
+        for entry in list(self.roll_border_slices.values()):
+            label = entry.get("label") if entry else None
+            if label and label.winfo_exists():
+                try:
+                    label.place_forget()
+                except tk.TclError:
+                    pass
+        if hasattr(self, "table_frame") and self.table_frame and self.table_frame.winfo_exists():
+            try:
+                self.table_frame.configure(padx=0, pady=0)
+            except tk.TclError:
+                pass
+
+    def objective_color_to_hex(self, color: str | None) -> str:
+        palette = {
+            "red": "#c84a3a",
+            "blue": "#2f6fb3",
+            "green": "#4a8a3a",
+            "yellow": "#c9a32f",
+            "purple": "#7a4bb3",
+        }
+        return palette.get(color or "", self.theme["accent"])
+
+    def get_color_overrides(self, player: Player | None):
+        if not player or not player.focus_overrides:
+            return None
+        return player.focus_overrides
+
+    def is_starlight_active(self, player: Player | None) -> bool:
+        if not player or not self.game:
+            return False
+        return getattr(player, "starlight_round", 0) == self.game.round_num
+
+    def get_value_wild_ids(self, hand: list[Die], player: Player | None):
+        if not hand or not self.is_starlight_active(player):
+            return None
+        wild_ids = {id(die) for die in hand if die.color == "purple"}
+        return wild_ids or None
+
+    def effective_die_color(self, die: Die, player: Player | None) -> str:
+        if player and player.focus_overrides:
+            override = player.focus_overrides.get(id(die))
+            if override:
+                return override
+        return die.color
+
+    def safe_config(self, widget, **kwargs) -> None:
+        if not widget:
+            return
+        try:
+            if widget.winfo_exists():
+                widget.config(**kwargs)
+        except tk.TclError:
+            return
+
+    def guard_cat_action(self, card: Card, expected: str) -> bool:
+        if card.name == expected:
+            return True
+        if self.debug_var.get():
+            self.add_log(f"[CatAction] Mismatch: {card.name} triggered {expected}.")
+        return False
+
+    def can_show_pit_baws(self, player: Player | None) -> bool:
+        if not player or player.is_ai:
+            return False
+        owned = {c.name for c in (player.dog_cards + player.stolen_dog_cards)}
+        return "Service Dawg" in owned and "Scurvy Dawg" in owned
+
+    def _draw_shop_dog(self, allow_pit_baws: bool) -> Card | None:
+        game = self.game
+        if not game:
+            return None
+        for _ in range(6):
+            card = game.draw_dog()
+            if not card:
+                return None
+            if card.name == "Pit Baws" and not allow_pit_baws:
+                game.dog_deck.add(card)
+                continue
+            return card
+        return None
+
+    def filter_secret_shop_cards(self, player: Player) -> None:
+        game = self.game
+        if not game:
+            return
+        allow_pit_baws = self.can_show_pit_baws(player) and not self.pit_baws_consumed
+        changed = False
+        for idx, card in enumerate(game.shop_dogs):
+            if card and card.name == "Pit Baws" and not allow_pit_baws:
+                game.dog_deck.add(card)
+                game.shop_dogs[idx] = None
+                changed = True
+        if changed:
+            for idx, card in enumerate(game.shop_dogs):
+                if card is None:
+                    new_card = self._draw_shop_dog(allow_pit_baws)
+                    game.shop_dogs[idx] = new_card
+                    if new_card:
+                        self.shop_flip_targets.add(("dog", idx))
+        if allow_pit_baws and not any(
+            card and card.name == "Pit Baws" for card in game.shop_dogs
+        ):
+            exclude = []
+            for p in self.players:
+                exclude.extend(p.dog_cards)
+                exclude.extend(p.stolen_dog_cards)
+            exclude.extend([c for c in game.shop_dogs if c])
+            pit_card = self._pop_named_dog_from_deck("Pit Baws", exclude)
+            if pit_card:
+                target_idx = next((i for i, c in enumerate(game.shop_dogs) if c is None), 0)
+                if game.shop_dogs[target_idx]:
+                    game.dog_deck.add(game.shop_dogs[target_idx])
+                game.shop_dogs[target_idx] = pit_card
+                self.shop_flip_targets.add(("dog", target_idx))
+
+    def _pop_named_dog_from_deck(self, name: str, exclude: list[Card]) -> Card | None:
+        game = self.game
+        if not game:
+            return None
+        deck = game.dog_deck
+        if not deck._cards:
+            deck.reshuffle(exclude=exclude)
+        for idx, card in enumerate(list(deck._cards)):
+            if card.name == name:
+                return deck._cards.pop(idx)
+        if not deck._cards:
+            deck.reshuffle(exclude=exclude)
+            for idx, card in enumerate(list(deck._cards)):
+                if card.name == name:
+                    return deck._cards.pop(idx)
+        base_count = sum(1 for card in deck._base if card.name == name)
+        if base_count <= 0:
+            return None
+        in_play = sum(1 for card in exclude if card.name == name)
+        in_draw = sum(1 for card in deck._cards if card.name == name)
+        if in_play + in_draw >= base_count:
+            return None
+        template = next((card for card in deck._base if card.name == name), None)
+        if not template:
+            return None
+        return Card(
+            template.name,
+            template.kind,
+            template.cost,
+            dict(template.effect),
+            template.description,
+        )
+        return None
+
+    def consume_pit_baws(self) -> None:
+        self.pit_baws_consumed = True
+        if not self.game:
+            return
+        for deck_list in (self.game.dog_deck._base, self.game.dog_deck._cards):
+            deck_list[:] = [card for card in deck_list if card.name != "Pit Baws"]
+
+    def reset_shop_memory(self) -> None:
+        self.shop_memory = {"cats": [], "dogs": []}
+
+    def update_shop_memory(self) -> None:
+        game = self.game
+        if not game:
+            return
+        for kind, cards in (("cats", game.shop_cats), ("dogs", game.shop_dogs)):
+            for card in cards:
+                if card:
+                    self.shop_memory.setdefault(kind, []).append(card.name)
+            if len(self.shop_memory.get(kind, [])) > 20:
+                self.shop_memory[kind] = self.shop_memory[kind][-20:]
+
+    def ai_shop_memory_bonus(self, card: Card) -> float:
+        if not self.in_shop or not card:
+            return 0.0
+        kind = "cats" if card.kind == "cat" else "dogs"
+        memory = self.shop_memory.get(kind, [])
+        if not memory:
+            return 0.0
+        count = sum(1 for name in memory if name == card.name)
+        if count <= 0:
+            return 0.0
+        return 0.15 * min(count, 3)
+
+    def ai_has_high_value_memory(self, player: Player, kind: str) -> bool:
+        if not self.in_shop or not self.game:
+            return False
+        memory_key = "cats" if kind == "cat" else "dogs"
+        memory = self.shop_memory.get(memory_key, [])
+        if not memory:
+            return False
+        current = {
+            c.name
+            for c in (self.game.shop_cats if kind == "cat" else self.game.shop_dogs)
+            if c
+        }
+        seen = set()
+        for name in reversed(memory):
+            if name in seen or name in current:
+                continue
+            seen.add(name)
+            card = self.find_card_definition(name, kind)
+            if not card:
+                continue
+            score = (
+                self.ai_score_dog_card(player, card)
+                if kind == "dog"
+                else self.ai_score_cat_card(player, card)
+            )
+            if score >= 2.6:
+                return True
+        return False
+
+    def trigger_shadow_dawg(self, source_player: Player) -> None:
+        game = self.game
+        if not game or self.in_shop:
+            return
+        for player in self.players:
+            if player is source_player:
+                continue
+            count = sum(
+                1
+                for card in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+                if card.name == "Shadow Dawg"
+            )
+            if count <= 0:
+                continue
+            if getattr(player, "shadow_dawg_triggered_round", 0) == game.round_num:
+                continue
+            player.pending_extra_rerolls += count
+            player.shadow_dawg_triggered_round = game.round_num
+            self.add_log(f"{player.name}'s Shadow Dawg: +{count} reroll next round.")
+
+    def apply_grudge_from_theft(self, target: Player) -> None:
+        if not target:
+            return
+        count = sum(
+            1
+            for card in (target.dog_cards + target.stolen_dog_cards + target.temp_dog_cards)
+            if card.name == "Grudge Dawg"
+        )
+        if count <= 0:
+            return
+        bonus = 6 * count
+        target.pending_grudge_bonus += bonus
+        self.add_log(f"Grudge Dawg: {target.name} gains +{bonus} pending score.")
+
+    def is_they_name(self, name: str) -> bool:
+        normalized = name.strip().lower()
+        return normalized in {
+            "libby",
+            "ares",
+            "gabby",
+            "hannah",
+            "katie",
+            "judy",
+            "renee",
+            "briar",
+            "brair",
+            "rhiannon",
+            "sheree",
+            "sharon",
+        }
+
+    def _add_option_slider(self, parent, label: str, var: tk.IntVar, min_val: int, max_val: int) -> None:
+        row = tk.Frame(parent, bg=self.theme["bg"])
+        row.pack(fill="x", pady=2)
+        tk.Label(
+            row,
+            text=label,
+            width=22,
+            anchor="w",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        self.create_image_slider(
+            row,
+            var,
+            min_val,
+            max_val,
+            length=260,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            show_value=True,
+        ).pack(side="left", padx=6)
+
+    def update_options_warning(self, *_args) -> None:
+        label = getattr(self, "options_warning_label", None)
+        if not label or not label.winfo_exists():
+            return
+        is_default = (
+            int(self.kibble_var.get()) == 4
+            and int(self.max_cat_var.get()) == 2
+            and int(self.max_dog_var.get()) == 5
+        )
+        if is_default:
+            label.config(text="")
+        else:
+            label.config(
+                text="Warning: Achievements are disabled when game options differ from defaults."
+            )
+
+    def make_text_readonly(self, widget: tk.Text) -> None:
+        widget.bind("<Key>", lambda _e: "break")
+        widget.bind("<Control-v>", lambda _e: "break")
+        widget.bind("<<Paste>>", lambda _e: "break")
+        widget.bind("<<Cut>>", lambda _e: "break")
+
+    def make_kibble_label(
+        self,
+        parent: tk.Frame,
+        text: str,
+        amount: int,
+        bg: str,
+        font,
+        fg: str,
+    ) -> tk.Frame:
+        row = tk.Frame(parent, bg=bg)
+        tk.Label(
+            row,
+            text=text,
+            font=font,
+            bg=bg,
+            fg=fg,
+        ).pack(side="left")
+        kibble_img = self.get_kibble_image(amount)
+        if kibble_img:
+            lbl = tk.Label(row, image=kibble_img, bg=bg)
+            lbl.image = kibble_img
+            lbl.pack(side="left", padx=(6, 2))
+        tk.Label(
+            row,
+            text=f"{amount}",
+            font=font,
+            bg=bg,
+            fg=fg,
+        ).pack(side="left")
+        return row
+
+    def get_shop_purchase_limit(self, player: Player) -> int:
+        base_limit = 3
+        daredevil_multiplier = 1
+        if any(
+            c.name == "Daredevil Dawg"
+            for c in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+        ):
+            daredevil_multiplier = 2
+        bonus = sum(
+            1
+            for c in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+            if c.name == "Golden Dawg"
+        )
+        return base_limit + (bonus * daredevil_multiplier)
+
+    def apply_display_mode(self) -> None:
+        self.root.attributes("-fullscreen", bool(self.fullscreen_var.get()))
+
+    def reset_options(self) -> None:
+        self.ensure_option_vars()
+        self.fullscreen_var.set(False)
+        self.apply_display_mode()
+        self.kibble_var.set(4)
+        self.max_cat_var.set(2)
+        self.max_dog_var.set(5)
+        self.volume_var.set(100)
+        self.apply_volume()
+
+    def toggle_options(self) -> None:
+        self.open_options_screen()
+
+    def ensure_option_vars(self) -> None:
+        if not hasattr(self, "fullscreen_var"):
+            self.fullscreen_var = tk.BooleanVar(value=False)
+        if not hasattr(self, "kibble_var"):
+            self.kibble_var = tk.IntVar(value=4)
+        if not hasattr(self, "max_cat_var"):
+            self.max_cat_var = tk.IntVar(value=2)
+        if not hasattr(self, "max_dog_var"):
+            self.max_dog_var = tk.IntVar(value=5)
+        if not hasattr(self, "volume_var"):
+            self.volume_var = tk.IntVar(value=100)
+
+    def open_options_screen(self) -> None:
+        self.ensure_option_vars()
+        if hasattr(self, "setup_frame") and self.setup_frame.winfo_exists():
+            self.setup_frame.destroy()
+        if hasattr(self, "options_screen") and self.options_screen.winfo_exists():
+            self.options_screen.lift()
+            return
+        self.stop_menu_audio()
+        self._build_options_ui()
+
+    def _build_options_ui(self) -> None:
+        self.options_screen = tk.Frame(self.root, bg=self.theme["bg"])
+        self.options_screen.pack(fill="both", expand=True, padx=10, pady=10)
+
+        content = tk.Frame(self.options_screen, bg=self.theme["bg"])
+        content.pack(fill="both", expand=True)
+
+        header = tk.Frame(content, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        header_img = self.ui_images.get("options")
+        if header_img:
+            header_label = tk.Label(header, image=header_img, bg=self.theme["bg"])
+            header_label.image = header_img
+            header_label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Options",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+
+        tabs = tk.Frame(content, bg=self.theme["bg"])
+        tabs.pack(pady=(0, 6))
+
+        self.options_tab_buttons = {}
+        self.options_tab_frames = {}
+
+        def show_tab(key: str) -> None:
+            for tab_key, frame in self.options_tab_frames.items():
+                if tab_key == key:
+                    frame.pack(fill="both", expand=True, pady=(6, 0))
+                else:
+                    frame.pack_forget()
+            for tab_key, btn in self.options_tab_buttons.items():
+                if tab_key == key:
+                    btn.config(bg=self.theme["accent"], activebackground=self.theme["accent"])
+                else:
+                    btn.config(bg=self.theme["bg"], activebackground=self.theme["bg"])
+
+        def add_tab_button(key: str, label: str, image_key: str) -> None:
+            img = self.ui_images.get(image_key)
+            wrap = tk.Frame(
+                tabs,
+                bg=self.theme["bg"],
+                highlightthickness=2,
+                highlightbackground=self.theme["bg"],
+            )
+            wrap.pack(side="left", padx=6)
+            if img:
+                btn = tk.Button(
+                    wrap,
+                    image=img,
+                    command=lambda: show_tab(key),
+                    bg=self.theme["bg"],
+                    activebackground=self.theme["bg"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    wrap,
+                    text=label,
+                    command=lambda: show_tab(key),
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=10,
+                    pady=4,
+                )
+            btn.pack()
+            self.options_tab_buttons[key] = btn
+
+            def set_highlight(_event=None, active: bool = False) -> None:
+                wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+            for widget in (wrap, btn):
+                widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+        add_tab_button("game", "Game", "game_tab")
+        add_tab_button("audio", "Audio", "audio_tab")
+        add_tab_button("video", "Video", "video_tab")
+
+        self.options_tab_frames["game"] = tk.Frame(content, bg=self.theme["bg"])
+        self.options_tab_frames["audio"] = tk.Frame(content, bg=self.theme["bg"])
+        self.options_tab_frames["video"] = tk.Frame(content, bg=self.theme["bg"])
+
+        game_frame = self.options_tab_frames["game"]
+        tk.Label(
+            game_frame,
+            text="Game Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(0, 6))
+        self._add_option_slider(game_frame, "Starting Kibbles", self.kibble_var, 0, 12)
+        self._add_option_slider(game_frame, "Max Cat Cards", self.max_cat_var, 1, 12)
+        self._add_option_slider(game_frame, "Max Dog Cards", self.max_dog_var, 1, 12)
+        self.options_warning_label = tk.Label(
+            game_frame,
+            text="",
+            font=self.theme["small_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["muted"],
+            wraplength=520,
+            justify="left",
+        )
+        self.options_warning_label.pack(anchor="w", pady=(6, 0))
+        for var in (self.kibble_var, self.max_cat_var, self.max_dog_var):
+            var.trace_add("write", self.update_options_warning)
+        self.update_options_warning()
+        tk.Checkbutton(
+            game_frame,
+            text="Speed",
+            variable=self.speed_var,
+            command=self.on_toggle_speed,
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(anchor="w", pady=(6, 2))
+        if self.debug_enabled:
+            tk.Checkbutton(
+                game_frame,
+                text="Debug",
+                variable=self.debug_var,
+                command=self.on_toggle_debug,
+                font=self.theme["body_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+                selectcolor=self.theme["panel"],
+                activebackground=self.theme["bg"],
+            ).pack(anchor="w", pady=(0, 6))
+        default_img = self.ui_images.get("default")
+        default_wrap = tk.Frame(
+            game_frame,
+            bg=self.theme["bg"],
+            highlightthickness=2,
+            highlightbackground=self.theme["bg"],
+        )
+        default_wrap.pack(anchor="w", pady=(6, 0))
+        if default_img:
+            default_btn = tk.Button(
+                default_wrap,
+                image=default_img,
+                command=self.reset_options,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            default_btn.image = default_img
+        else:
+            default_btn = tk.Button(
+                default_wrap,
+                text="Reset Options",
+                command=self.reset_options,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=10,
+                pady=4,
+            )
+        default_btn.pack()
+
+        def set_default_highlight(_event=None, active: bool = False) -> None:
+            default_wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+        for widget in (default_wrap, default_btn):
+            widget.bind("<ButtonPress-1>", lambda _e: set_default_highlight(active=True))
+            widget.bind("<ButtonRelease-1>", lambda _e: set_default_highlight(active=False))
+            widget.bind("<Leave>", lambda _e: set_default_highlight(active=False))
+
+        audio_frame = self.options_tab_frames["audio"]
+        tk.Label(
+            audio_frame,
+            text="Audio Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(0, 6))
+        audio_row = tk.Frame(audio_frame, bg=self.theme["bg"])
+        audio_row.pack(anchor="w", pady=(0, 6))
+        tk.Checkbutton(
+            audio_row,
+            text="Mute",
+            variable=self.mute_var,
+            command=self.on_toggle_mute,
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+        ).pack(side="left")
+        tk.Label(
+            audio_row,
+            text="Volume",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(side="left", padx=(10, 4))
+        self.create_image_slider(
+            audio_row,
+            self.volume_var,
+            0,
+            100,
+            length=220,
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            on_change=self.on_volume_change,
+            show_value=True,
+        ).pack(side="left")
+
+        video_frame = self.options_tab_frames["video"]
+        tk.Label(
+            video_frame,
+            text="Video Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(0, 6))
+        tk.Checkbutton(
+            video_frame,
+            text="Full Screen",
+            variable=self.fullscreen_var,
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["bg"],
+            command=self.apply_display_mode,
+        ).pack(anchor="w")
+
+        footer = tk.Frame(content, bg=self.theme["bg"])
+        footer.pack(pady=(12, 0))
+        back_img = self.ui_images.get("back")
+        close_img = self.ui_images.get("close")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        back_wrap = tk.Frame(
+            footer,
+            bg=self.theme["bg"],
+            highlightthickness=2,
+            highlightbackground=self.theme["bg"],
+        )
+        back_wrap.pack()
+        if back_img:
+            btn = tk.Button(
+                back_wrap,
+                image=back_img,
+                command=self.return_to_main_menu,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            btn.image = back_img
+        else:
+            btn = tk.Button(
+                back_wrap,
+                text="Return to Main Menu",
+                command=self.return_to_main_menu,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=12,
+                pady=4,
+            )
+        btn.pack()
+
+        def set_back_highlight(_event=None, active: bool = False) -> None:
+            back_wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+        for widget in (back_wrap, btn):
+            widget.bind("<ButtonPress-1>", lambda _e: set_back_highlight(active=True))
+            widget.bind("<ButtonRelease-1>", lambda _e: set_back_highlight(active=False))
+            widget.bind("<Leave>", lambda _e: set_back_highlight(active=False))
+
+        show_tab("game")
+
+    def return_to_main_menu(self) -> None:
+        if hasattr(self, "options_screen") and self.options_screen.winfo_exists():
+            self.options_screen.destroy()
+        if hasattr(self, "rulebook_screen") and self.rulebook_screen.winfo_exists():
+            self.rulebook_screen.destroy()
+        if self.card_shop_frame and self.card_shop_frame.winfo_exists():
+            self.card_shop_frame.destroy()
+        if self.personal_collection_frame and self.personal_collection_frame.winfo_exists():
+            self.personal_collection_frame.destroy()
+        self._build_setup_ui()
+    def _build_splash_ui(self) -> None:
+        self.splash_frame = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        self.splash_frame.pack(fill="both", expand=True)
+        self.root.update_idletasks()
+        self.splash_size = (self.root.winfo_width(), self.root.winfo_height())
+        if self.team_jibby_image:
+            img_label = tk.Label(
+                self.splash_frame,
+                image=self.team_jibby_image,
+                bg=self.theme["panel_dark"],
+            )
+            img_label.pack(expand=True, pady=(40, 10))
+        label = tk.Label(
+            self.splash_frame,
+            text="a team jibby game",
+            font=self.theme["splash_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        label.pack(expand=True)
+        hint = tk.Label(
+            self.splash_frame,
+            text="Click to skip",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        hint.pack(pady=(0, 20))
+        footer = tk.Label(
+            self.splash_frame,
+            text="pre-alpha version 0.14",
+            font=self.theme["small_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        footer.place(relx=1.0, rely=1.0, anchor="se", x=-12, y=-10)
+        self.splash_frame.bind("<Button-1>", self.skip_splash)
+        label.bind("<Button-1>", self.skip_splash)
+        hint.bind("<Button-1>", self.skip_splash)
+        self.splash_job = None
+
+    def _build_loading_ui(self) -> None:
+        if self.loading_frame and self.loading_frame.winfo_exists():
+            return
+        parent = (
+            self.splash_frame
+            if hasattr(self, "splash_frame") and self.splash_frame.winfo_exists()
+            else self.root
+        )
+        self.loading_frame = tk.Frame(parent, bg=self.theme["panel_dark"])
+        if parent is self.splash_frame:
+            self.loading_frame.place(relx=0.0, rely=1.0, anchor="sw", x=12, y=-12)
+        else:
+            self.loading_frame.pack(fill="both", expand=True)
+        label = tk.Label(
+            self.loading_frame,
+            text="Reticulating splines...",
+            font=self.theme["header_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        if parent is self.splash_frame:
+            label.pack(anchor="w")
+        else:
+            label.pack(pady=(0, 12), expand=True)
+        self.loading_canvas = tk.Canvas(
+            self.loading_frame,
+            width=120,
+            height=120,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.loading_canvas.create_oval(
+            10, 10, 110, 110, outline=self.theme["border"], width=2
+        )
+        self.loading_arc = self.loading_canvas.create_arc(
+            10,
+            10,
+            110,
+            110,
+            start=90,
+            extent=0,
+            fill=self.theme["accent"],
+            outline="",
+        )
+        if parent is self.splash_frame:
+            self.loading_canvas.pack(anchor="w", pady=(6, 0))
+        else:
+            self.loading_canvas.pack()
+        self.loading_frame.lift()
+
+    def _destroy_loading_ui(self) -> None:
+        if self.loading_frame and self.loading_frame.winfo_exists():
+            self.loading_frame.destroy()
+        self.loading_frame = None
+        self.loading_canvas = None
+        self.loading_arc = None
+
+    def _set_loading_progress(self, fraction: float) -> None:
+        if not self.loading_canvas or not self.loading_arc:
+            return
+        clamped = max(0.0, min(1.0, fraction))
+        extent = int(360 * clamped)
+        self.loading_canvas.itemconfigure(self.loading_arc, extent=extent)
+        self.loading_canvas.update_idletasks()
+
+    def _init_asset_placeholders(self) -> None:
+        self.dice_images = {}
+        self.purple_wild_image = None
+        self.dice_images_gray = {}
+        self.dice_images_small = {}
+        self.dice_images_tiny = {}
+        self.bag_image = None
+        self.kibble_images = {}
+        self.cat_deck_image = None
+        self.dog_deck_image = None
+        self.team_jibby_image = None
+        self.title_splash_image = None
+        self.ui_images = {}
+        self.profile_icon_images = {}
+        self.card_images = {}
+        self.card_images_full = {}
+        self.hand_display_height = 0
+        self.title_splash_scaled = None
+        self.achievement_images = {}
+        self.achievement_images_gray = {}
+        self.dice_images_gray_small = {}
+        self.dice_images_gray_tiny = {}
+        self.purple_wild_variant_cache = {}
+        self.audio_ready = False
+        self.flip_sound = None
+        self.leather_sound = None
+        self.roll_sound = None
+        self.shop_sound = None
+        self.achievement_sound = None
+        self.victory_sound = None
+        self.click_sound = None
+        self.main_theme_sound = None
+        self.drop_sound = None
+        self.roll_border_label = None
+        self.roll_border_image = None
+        self.roll_border_pil = None
+        self.roll_border_slices = {}
+
+    def _build_asset_tasks(self) -> list[callable]:
+        return [
+            lambda: setattr(self, "dice_images", self.load_dice_images()),
+            lambda: setattr(self, "purple_wild_image", self.load_purple_wild_image()),
+            lambda: setattr(self, "dice_images_gray", self.build_grayscale_dice_images(self.dice_images)),
+            lambda: setattr(self, "dice_images_small", self.scale_dice_images(self.dice_images, factor=2)),
+            lambda: setattr(self, "dice_images_tiny", self.scale_dice_images(self.dice_images, factor=3)),
+            lambda: setattr(self, "bag_image", self.load_bag_image()),
+            lambda: setattr(self, "kibble_images", self.load_kibble_images()),
+            lambda: setattr(self, "cat_deck_image", self.load_cat_deck_image()),
+            lambda: setattr(self, "dog_deck_image", self.load_dog_deck_image()),
+            lambda: setattr(self, "title_splash_image", self.load_title_splash_image()),
+            lambda: setattr(self, "ui_images", self.load_ui_images()),
+            lambda: setattr(self, "profile_icon_images", self.load_profile_icon_images()),
+            lambda: setattr(self, "card_images", self.load_card_images()),
+            lambda: setattr(self, "card_images_full", self.load_card_images(full_size=True)),
+            lambda: setattr(self, "hand_display_height", self.calculate_hand_display_height()),
+            lambda: setattr(self, "achievement_images", self.load_achievement_images()),
+            lambda: setattr(
+                self,
+                "achievement_images_gray",
+                {name: self.make_grayscale_image(img) for name, img in self.achievement_images.items() if img},
+            ),
+            self.init_audio,
+            lambda: setattr(self, "flip_sound", self.load_sound(os.path.join("Assets", "Audio", "flipcard.wav"))),
+            lambda: setattr(self, "leather_sound", self.load_sound(os.path.join("Assets", "Audio", "leatherbag.wav"))),
+            lambda: setattr(self, "roll_sound", self.load_sound(os.path.join("Assets", "Audio", "diceroll.wav"))),
+            lambda: setattr(self, "shop_sound", self.load_sound(os.path.join("Assets", "Audio", "shop.wav"))),
+            lambda: setattr(self, "achievement_sound", self.load_sound(os.path.join("Assets", "Audio", "achievement.wav"))),
+            lambda: setattr(self, "victory_sound", self.load_sound(os.path.join("Assets", "Audio", "victory.wav"))),
+            lambda: setattr(self, "click_sound", self.load_sound(os.path.join("Assets", "Audio", "click.wav"))),
+            lambda: setattr(self, "main_theme_sound", self.load_sound(os.path.join("Assets", "Audio", "main_theme.wav"))),
+            lambda: setattr(self, "drop_sound", self.load_sound(os.path.join("Assets", "Audio", "drop.wav"))),
+        ]
+
+    def _load_assets_step(self) -> None:
+        if not getattr(self, "loading_tasks", None):
+            return
+        if self.loading_index >= self.loading_total:
+            self._set_loading_progress(1.0)
+            self._destroy_loading_ui()
+            self.assets_loaded = True
+            return
+        task = self.loading_tasks[self.loading_index]
+        try:
+            task()
+        except Exception:
+            pass
+        self.loading_index += 1
+        self._set_loading_progress(self.loading_index / self.loading_total)
+        self.root.after(5, self._load_assets_step)
+
+    def skip_splash(self, _event=None) -> None:
+        if not getattr(self, "assets_loaded", False):
+            return
+        if getattr(self, "splash_job", None):
+            self.root.after_cancel(self.splash_job)
+        if hasattr(self, "splash_frame"):
+            self.splash_frame.destroy()
+        self._build_title_splash_ui()
+
+    def _build_title_splash_ui(self) -> None:
+        self.title_splash_frame = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        self.title_splash_frame.pack(fill="both", expand=True)
+        if getattr(self, "splash_size", None):
+            width, height = self.splash_size
+            if width > 0 and height > 0:
+                self.root.geometry(f"{width}x{height}")
+                self.title_splash_frame.pack_propagate(False)
+                self.title_splash_frame.config(width=width, height=height)
+        if self.title_splash_image:
+            self.root.update_idletasks()
+            max_w = self.root.winfo_width()
+            max_h = self.root.winfo_height()
+            self.title_splash_scaled = self.scale_image_to_fit(
+                self.title_splash_image, max_w - 40, max_h - 40
+            )
+            img_label = tk.Label(
+                self.title_splash_frame,
+                image=self.title_splash_scaled or self.title_splash_image,
+                bg=self.theme["panel_dark"],
+            )
+            img_label.pack(expand=True)
+            img_label.bind("<Button-1>", self.skip_title_splash)
+        self.title_splash_frame.bind("<Button-1>", self.skip_title_splash)
+
+    def skip_title_splash(self, _event=None) -> None:
+        if hasattr(self, "title_splash_frame"):
+            self.title_splash_frame.destroy()
+        self._build_setup_ui()
+
+    def _build_setup_ui(self) -> None:
+        self.setup_frame = tk.Frame(self.root, bg=self.theme["bg"])
+        self.setup_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.start_main_theme()
+
+        content = tk.Frame(self.setup_frame, bg=self.theme["bg"])
+        content.pack(fill="both", expand=True)
+
+        header = tk.Frame(content, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        title_img = self.ui_images.get("title")
+        if title_img:
+            label = tk.Label(header, image=title_img, bg=self.theme["bg"])
+            label.image = title_img
+            label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Welcome to Cats Dogs and Dice",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+        player_area = tk.Frame(content, bg=self.theme["bg"])
+        player_area.pack(anchor="center", pady=10)
+
+        def make_title_button(key: str, text: str, command, parent=None, pack_side: str = "top") -> None:
+            img = self.ui_images.get(key)
+            host = parent or player_area
+            wrap = tk.Frame(
+                host,
+                bg=self.theme["bg"],
+                highlightthickness=2,
+                highlightbackground=self.theme["bg"],
+            )
+            if pack_side == "left":
+                wrap.pack(side="left", padx=6, pady=(10, 6))
+            else:
+                wrap.pack(pady=(10, 6))
+            if img:
+                btn = tk.Button(
+                    wrap,
+                    image=img,
+                    command=command,
+                    bg=self.theme["bg"],
+                    activebackground=self.theme["bg"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    wrap,
+                    text=text,
+                    command=command,
+                    font=self.theme["subheader_font"],
+                    bg=self.theme["accent"],
+                    fg="white",
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=12,
+                    pady=6,
+                )
+            btn.pack()
+
+            def set_highlight(_event=None, active: bool = False) -> None:
+                wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+            for widget in (wrap, btn):
+                widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+        make_title_button("start", "Start", self.open_naming_screen)
+
+        make_title_button("options", "Options", self.toggle_options)
+
+        make_title_button("rulebook", "Rulebook", self.open_rulebook_window)
+        make_title_button("card_shop", "Card Shop", self.open_card_shop_screen)
+
+        self.profile_label = tk.Label(
+            player_area,
+            text=f"Profile: {self.profile_data['name']}" if self.profile_data else "Profile: None",
+            font=self.theme["small_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["muted"],
+        )
+        self.profile_label.pack(pady=(4, 2))
+
+        profile_actions = tk.Frame(player_area, bg=self.theme["bg"])
+        profile_actions.pack(pady=(0, 6))
+        make_title_button(
+            "manage_profiles",
+            "Manage Profiles",
+            self.open_profiles_manager,
+            parent=profile_actions,
+            pack_side="left",
+        )
+        make_title_button(
+            "exit_game",
+            "Exit Game",
+            self.root.destroy,
+            parent=profile_actions,
+            pack_side="left",
+        )
+
+
+    def open_naming_screen(self) -> None:
+        if hasattr(self, "setup_frame"):
+            self.setup_frame.destroy()
+        self.stop_menu_audio()
+        self._build_naming_ui()
+
+    def open_card_shop_screen(self) -> None:
+        if not self.profile_data:
+            self.show_toast("Load a profile to access the card shop.")
+            return
+        if hasattr(self, "setup_frame") and self.setup_frame.winfo_exists():
+            self.setup_frame.destroy()
+        if self.personal_collection_frame and self.personal_collection_frame.winfo_exists():
+            self.personal_collection_frame.destroy()
+        if self.card_shop_frame and self.card_shop_frame.winfo_exists():
+            self.card_shop_frame.lift()
+            return
+        self.card_shop_selected_booster = None
+        self.card_shop_frame = tk.Frame(self.root, bg=self.theme["bg"])
+        self.card_shop_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        header = tk.Frame(self.card_shop_frame, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        title_img = self.ui_images.get("card_shop")
+        if title_img:
+            label = tk.Label(header, image=title_img, bg=self.theme["bg"])
+            label.image = title_img
+            label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Card Shop",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+
+        banked = int(self.profile_data.get("banked_kibbles", 0))
+        self.card_shop_bank_label = tk.Label(
+            self.card_shop_frame,
+            text=f"Banked kibbles: {banked}",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["muted"],
+        )
+        self.card_shop_bank_label.pack(pady=(0, 12))
+
+        boosters_row = tk.Frame(self.card_shop_frame, bg=self.theme["bg"])
+        boosters_row.pack(anchor="center", pady=(0, 10))
+
+        def booster_button(key: str, label: str) -> None:
+            img = self.ui_images.get(key)
+            wrap = tk.Frame(
+                boosters_row,
+                bg=self.theme["bg"],
+                highlightthickness=2,
+                highlightbackground=self.theme["bg"],
+            )
+            wrap.pack(side="left", padx=8)
+            owned = self.is_booster_effectively_owned(key)
+            if img:
+                btn = tk.Button(
+                    wrap,
+                    image=img,
+                    command=lambda k=key: self.set_card_shop_booster(k),
+                    bg=self.theme["bg"],
+                    activebackground=self.theme["bg"],
+                    relief="flat",
+                    borderwidth=0,
+                    state="disabled" if owned else "normal",
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    wrap,
+                    text=label,
+                    command=lambda k=key: self.set_card_shop_booster(k),
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=10,
+                    pady=6,
+                    state="disabled" if owned else "normal",
+                )
+            btn.pack()
+            if owned:
+                tk.Label(
+                    wrap,
+                    text="Purchased",
+                    font=self.theme["small_font"],
+                    bg=self.theme["bg"],
+                    fg=self.theme["muted"],
+                ).pack(pady=(4, 0))
+            else:
+                tk.Button(
+                    wrap,
+                    text="Buy (75)",
+                    command=lambda k=key: self.purchase_booster_pack(k),
+                    font=self.theme["small_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=8,
+                    pady=2,
+                ).pack(pady=(4, 0))
+
+            def set_highlight(_event=None, active: bool = False) -> None:
+                wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+            for widget in (wrap, btn):
+                widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+        booster_button("rivalry_booster", "Rivalry Booster")
+        booster_button("service_booster", "Service Booster")
+        booster_button("trickster_booster", "Trickster Booster")
+
+        self.card_shop_picker_frame = tk.Frame(self.card_shop_frame, bg=self.theme["bg"])
+        self.card_shop_picker_frame.pack(fill="x", pady=(10, 0))
+        self.render_card_shop_picker()
+
+        footer = tk.Frame(self.card_shop_frame, bg=self.theme["bg"])
+        footer.pack(pady=(10, 0))
+        collection_img = self.ui_images.get("personal_collection")
+        if collection_img:
+            collection_btn = tk.Button(
+                footer,
+                image=collection_img,
+                command=self.open_personal_collection_screen,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            collection_btn.image = collection_img
+        else:
+            collection_btn = tk.Button(
+                footer,
+                text="Personal Collection",
+                command=self.open_personal_collection_screen,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=12,
+                pady=4,
+            )
+        collection_btn.pack(pady=(0, 8))
+        back_img = self.ui_images.get("back") or (
+            self.profile_action_images.get("back") if hasattr(self, "profile_action_images") else None
+        )
+        if back_img:
+            btn = tk.Button(
+                footer,
+                image=back_img,
+                command=self.return_to_main_menu,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            btn.image = back_img
+        else:
+            btn = tk.Button(
+                footer,
+                text="Return to Main Menu",
+                command=self.return_to_main_menu,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=12,
+                pady=4,
+            )
+        btn.pack()
+
+    def open_personal_collection_screen(self) -> None:
+        if not self.profile_data:
+            self.show_toast("Load a profile to view your collection.")
+            return
+        if self.card_shop_frame and self.card_shop_frame.winfo_exists():
+            self.card_shop_frame.destroy()
+        if self.personal_collection_frame and self.personal_collection_frame.winfo_exists():
+            self.personal_collection_frame.destroy()
+        self.personal_collection_frame = tk.Frame(self.root, bg=self.theme["bg"])
+        self.personal_collection_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        header = tk.Frame(self.personal_collection_frame, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        title_img = self.ui_images.get("personal_collection")
+        if title_img:
+            label = tk.Label(header, image=title_img, bg=self.theme["bg"])
+            label.image = title_img
+            label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Personal Collection",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+
+        container = tk.Frame(self.personal_collection_frame, bg=self.theme["bg"])
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, bg=self.theme["bg"], highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        inner = tk.Frame(canvas, bg=self.theme["bg"])
+        window_id = canvas.create_window((0, 0), window=inner, anchor="n")
+
+        def on_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def on_canvas_resize(event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", on_configure)
+        canvas.bind("<Configure>", on_canvas_resize)
+
+        collection = self.profile_data.get("shop_collection", {"cats": [], "dogs": []})
+        purchased_cats = set(collection.get("cats", []))
+        purchased_dogs = set(collection.get("dogs", []))
+
+        def unique_cards(cards: list[Card]) -> list[Card]:
+            seen = set()
+            result = []
+            for card in cards:
+                if card.name in seen:
+                    continue
+                seen.add(card.name)
+                result.append(card)
+            return result
+
+        def render_collection_group(title: str, cards: list[Card], purchased: set[str]) -> None:
+            tk.Label(
+                inner,
+                text=title,
+                font=self.theme["subheader_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack(pady=(6, 4))
+            grid = tk.Frame(inner, bg=self.theme["bg"])
+            grid.pack(pady=(0, 8))
+            cols = 6
+            for idx, card in enumerate(cards):
+                img = self.get_picker_card_image(card)
+                if card.name not in purchased:
+                    img = self.get_picker_card_image_gray(card)
+                if img:
+                    lbl = tk.Label(grid, image=img, bg=self.theme["bg"])
+                    lbl.image = img
+                else:
+                    lbl = tk.Label(
+                        grid,
+                        text=card.name,
+                        font=self.theme["small_font"],
+                        bg=self.theme["bg"],
+                        fg=self.theme["muted"] if card.name not in purchased else self.theme["text"],
+                        wraplength=120,
+                        justify="center",
+                    )
+                lbl.grid(row=idx // cols, column=idx % cols, padx=6, pady=6)
+                self.attach_card_tooltip(lbl, card)
+
+        render_collection_group("Cats", unique_cards(build_cat_cards()), purchased_cats)
+        render_collection_group("Dogs", unique_cards(build_dog_cards()), purchased_dogs)
+
+        footer = tk.Frame(self.personal_collection_frame, bg=self.theme["bg"])
+        footer.pack(pady=(10, 0))
+        back_img = self.ui_images.get("back") or (
+            self.profile_action_images.get("back") if hasattr(self, "profile_action_images") else None
+        )
+        if back_img:
+            btn = tk.Button(
+                footer,
+                image=back_img,
+                command=self.open_card_shop_screen,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            btn.image = back_img
+        else:
+            btn = tk.Button(
+                footer,
+                text="Back",
+                command=self.open_card_shop_screen,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=12,
+                pady=4,
+            )
+        btn.pack()
+
+    def _build_naming_ui(self) -> None:
+        self.naming_frame = tk.Frame(self.root, bg=self.theme["bg"])
+        self.naming_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        content = tk.Frame(self.naming_frame, bg=self.theme["bg"])
+        content.pack(fill="both", expand=True)
+
+        header = tk.Frame(content, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        header_img = self.ui_images.get("player_setup")
+        if header_img:
+            header_label = tk.Label(header, image=header_img, bg=self.theme["bg"])
+            header_label.image = header_img
+            header_label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Player Setup",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+        tk.Label(
+            header,
+            text="Player 1 is always human.",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["muted"],
+        ).pack(pady=(0, 6))
+
+        ai_name_pool = [
+            "Libby",
+            "Justin",
+            "Karl",
+            "Ben",
+            "Weston",
+            "Michael",
+            "Kyle",
+            "Ares",
+            "Gabby",
+            "Hannah",
+            "Katie",
+            "Keith",
+            "Cole",
+            "Judy",
+            "Renee",
+            "Joe",
+            "James",
+            "Briar",
+            "Rhiannon",
+            "Sheree",
+            "Marc",
+            "Mike",
+            "Sharon",
+        ]
+        random.shuffle(ai_name_pool)
+        self.name_vars = []
+        self.ai_vars = []
+        self.name_icon_labels = []
+        self.name_avatar_keys = []
+
+        def default_avatar_key(name: str) -> str:
+            return "they" if self.is_they_name(name) else "he"
+
+        def select_name_icon(name: str, is_ai: bool, avatar_key: str | None) -> tk.PhotoImage | None:
+            if is_ai:
+                return self.profile_icon_images.get("ai")
+            key = avatar_key or default_avatar_key(name)
+            return self.profile_icon_images.get(key, self.profile_icon_images.get("he"))
+
+        def update_name_icon(index: int) -> None:
+            if index >= len(self.name_vars) or index >= len(self.ai_vars):
+                return
+            name = self.name_vars[index].get()
+            is_ai = bool(self.ai_vars[index].get())
+            avatar_key = self.name_avatar_keys[index] if index < len(self.name_avatar_keys) else None
+            icon = select_name_icon(name, is_ai, avatar_key)
+            label = self.name_icon_labels[index]
+            if not label.winfo_exists():
+                return
+            if icon:
+                self.safe_config(label, image=icon, text="")
+                label.image = icon
+            else:
+                self.safe_config(label, image="", text="")
+        player_area = tk.Frame(content, bg=self.theme["bg"])
+        player_area.pack(anchor="center", pady=10)
+        for i in range(4):
+            row = tk.Frame(player_area, bg=self.theme["bg"])
+            row.pack(anchor="center", pady=2)
+            player_key = f"player{i + 1}"
+            player_img = self.ui_images.get(player_key)
+            if player_img:
+                label = tk.Label(row, image=player_img, bg=self.theme["bg"])
+                label.image = player_img
+                label.pack(side="left")
+            else:
+                tk.Label(
+                    row,
+                    text=f"Player {i + 1} name:",
+                    width=14,
+                    anchor="w",
+                    font=self.theme["body_font"],
+                    bg=self.theme["bg"],
+                    fg=self.theme["text"],
+                ).pack(side="left")
+            default_name = f"Player {i + 1}"
+            if i > 0 and ai_name_pool:
+                default_name = ai_name_pool.pop()
+            if i == 0 and self.profile_data and self.profile_data.get("name"):
+                default_name = self.profile_data["name"]
+            name_var = tk.StringVar(value=default_name)
+            name_var.trace_add("write", lambda *_args, idx=i: update_name_icon(idx))
+            tk.Entry(
+                row,
+                textvariable=name_var,
+                width=22,
+                font=self.theme["body_font"],
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+                relief="groove",
+            ).pack(side="left", padx=5)
+            self.name_vars.append(name_var)
+            if i == 0:
+                tk.Label(
+                    row,
+                    text="Human",
+                    font=self.theme["body_font"],
+                    bg=self.theme["bg"],
+                    fg=self.theme["muted"],
+                ).pack(side="left", padx=5)
+                self.ai_vars.append(tk.BooleanVar(value=False))
+            else:
+                var = tk.BooleanVar(value=True)
+                self.ai_vars.append(var)
+                var.trace_add("write", lambda *_args, idx=i: update_name_icon(idx))
+                tk.Checkbutton(
+                    row,
+                    text="AI",
+                    variable=var,
+                    font=self.theme["body_font"],
+                    bg=self.theme["bg"],
+                    fg=self.theme["text"],
+                    selectcolor=self.theme["panel"],
+                    activebackground=self.theme["bg"],
+                ).pack(side="left", padx=5)
+            icon_label = tk.Label(row, bg=self.theme["bg"], cursor="hand2" if i == 0 else "")
+            icon_label.pack(side="left", padx=6)
+            if i == 0:
+                self.name_avatar_keys.append(default_avatar_key(default_name))
+            else:
+                self.name_avatar_keys.append(None)
+            self.name_icon_labels.append(icon_label)
+            update_name_icon(i)
+
+            if i == 0:
+                def cycle_avatar(_event=None, idx=i) -> None:
+                    if idx >= len(self.name_avatar_keys):
+                        return
+                    cycle = ["he", "they", "ai"]
+                    current = self.name_avatar_keys[idx] or default_avatar_key(self.name_vars[idx].get())
+                    if current not in cycle:
+                        current = "he"
+                    next_key = cycle[(cycle.index(current) + 1) % len(cycle)]
+                    self.name_avatar_keys[idx] = next_key
+                    update_name_icon(idx)
+
+                icon_label.bind("<Button-1>", cycle_avatar)
+
+        actions = tk.Frame(content, bg=self.theme["bg"])
+        actions.pack(pady=(10, 0))
+        def make_action_button(image_key: str, fallback_text: str, command) -> None:
+            img = self.ui_images.get(image_key)
+            wrap = tk.Frame(
+                actions,
+                bg=self.theme["bg"],
+                highlightthickness=2,
+                highlightbackground=self.theme["bg"],
+            )
+            wrap.pack(side="left", padx=6)
+            if img:
+                btn = tk.Button(
+                    wrap,
+                    image=img,
+                    command=command,
+                    bg=self.theme["bg"],
+                    activebackground=self.theme["bg"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    wrap,
+                    text=fallback_text,
+                    command=command,
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=10,
+                    pady=4,
+                )
+            btn.pack()
+
+            def set_highlight(_event=None, active: bool = False) -> None:
+                wrap.config(highlightbackground=self.theme["accent"] if active else self.theme["bg"])
+
+            for widget in (wrap, btn):
+                widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+        make_action_button("back", "Back", self.back_to_welcome)
+        make_action_button("start_game", "Start Game", self.start_game)
+
+    def back_to_welcome(self) -> None:
+        if hasattr(self, "naming_frame"):
+            self.naming_frame.destroy()
+        if hasattr(self, "profiles_frame"):
+            self.profiles_frame.destroy()
+        self.game_depth = 0
+        self.start_main_theme()
+        self._build_setup_ui()
+        self.update_pause_button_visibility()
+
+    def start_game(self) -> None:
+        self.ensure_option_vars()
+        self.game_depth = 0
+        self.pit_baws_consumed = False
+        if self.profile_data:
+            stats = self.profile_data.setdefault("stats", {})
+            stats["total_games"] = stats.get("total_games", 0) + 1
+            self.save_profile()
+        self.players = []
+        objective_colors = list(BASE_COLORS)
+        random.shuffle(objective_colors)
+        for i in range(4):
+            raw_name = self.name_vars[i].get().strip()
+            is_ai = self.ai_vars[i].get() if i != 0 else False
+            name = raw_name if raw_name else f"Player {i + 1}"
+            bag = Bag({c: 5 for c in BASE_COLORS})
+            objective_color = objective_colors[i % len(objective_colors)]
+            self.players.append(
+                Player(
+                    name,
+                    is_ai,
+                    bag,
+                    kibbles=float(self.kibble_var.get()),
+                    objective_color=objective_color,
+                )
+            )
+        self.player_avatar_keys = []
+        for i, player in enumerate(self.players):
+            if i == 0 and hasattr(self, "name_avatar_keys") and i < len(self.name_avatar_keys):
+                avatar_key = self.name_avatar_keys[i] or ("they" if self.is_they_name(player.name) else "he")
+            elif player.is_ai:
+                avatar_key = "ai"
+            else:
+                avatar_key = "they" if self.is_they_name(player.name) else "he"
+            self.player_avatar_keys.append(avatar_key)
+        self.profile_player_name = None
+        if self.profile_data and self.players:
+            self.profile_player_name = self.players[0].name
+        self.show_hand_info = False
+
+        self.shop_order = self.build_clockwise_order(self.round_start_index)
+        self.shop_purchase_counts = [0] * len(self.players)
+        self.game = Game(
+            self.players,
+            max_cat_cards=self.max_cat_var.get(),
+            max_dog_cards=self.max_dog_var.get(),
+        )
+        self.apply_profile_card_gating()
+        self.bonus_points_by_player = {p.name: {} for p in self.players}
+        for player in self.players:
+            player.dog_cards = []
+            player.stolen_dog_cards = []
+        if hasattr(self, "naming_frame") and self.naming_frame.winfo_exists():
+            self.naming_frame.destroy()
+        elif hasattr(self, "setup_frame") and self.setup_frame.winfo_exists():
+            self.setup_frame.destroy()
+        self._build_game_ui()
+        self.start_first_player_phase()
+
+    def _build_game_ui(self) -> None:
+        self.main_frame = tk.Frame(self.root, name="main_frame", bg=self.theme["bg"])
+        self.main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.global_options_frame = None
+        self.achievement_panel = None
+        self.achievement_listbox = None
+        self.root.bind_all("<Escape>", self.toggle_pause_menu)
+
+        esc_img = self.ui_images.get("esc")
+        self.pause_button_frame = tk.Frame(self.root, bg=self.theme["bg"])
+        self.pause_button_frame.place(x=4, y=4)
+        self.pause_button = tk.Label(
+            self.pause_button_frame,
+            text="" if esc_img else "ESC",
+            image=esc_img,
+            font=self.theme["small_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            padx=4,
+            pady=2,
+        )
+        if esc_img:
+            self.pause_button.image = esc_img
+        self.pause_button.pack()
+        self.pause_button.bind("<Button-1>", self.toggle_pause_menu)
+        self.pause_button.bind("<Enter>", lambda _e: self.pause_button.config(cursor="hand2"))
+        self.pause_button_frame.lift()
+        self.pause_button_frame.place_forget()
+
+        self.table_frame = tk.Frame(self.main_frame, name="table_frame", bg=self.theme["bg"])
+        self.table_frame.pack(fill="both", expand=True)
+        self.table_frame.bind("<Configure>", self.on_table_frame_resize, add="+")
+
+        self.top_frame = tk.Frame(
+            self.table_frame,
+            name="top_frame",
+            bg=self.theme["panel"],
+        )
+        self.bottom_frame = tk.Frame(
+            self.table_frame,
+            name="bottom_frame",
+            bg=self.theme["panel"],
+        )
+        self.left_frame = tk.Frame(
+            self.table_frame,
+            name="left_frame",
+            bg=self.theme["panel"],
+        )
+        self.right_frame = tk.Frame(
+            self.table_frame,
+            name="right_frame",
+            bg=self.theme["panel"],
+        )
+        self.center_frame = tk.Frame(self.table_frame, name="center_frame", bg=self.theme["panel_dark"])
+
+        self.table_frame.grid_rowconfigure(0, weight=2)
+        self.table_frame.grid_rowconfigure(1, weight=2)
+        self.table_frame.grid_rowconfigure(2, weight=0)
+        self.table_frame.grid_columnconfigure(0, weight=2)
+        self.table_frame.grid_columnconfigure(1, weight=3)
+        self.table_frame.grid_columnconfigure(2, weight=2)
+
+        self.top_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        self.left_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.center_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5, columnspan=3)
+        self.right_frame.grid(row=1, column=2, sticky="nsew", padx=5, pady=5)
+        self.bottom_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=(0, 5), columnspan=3)
+        self._build_center_panel()
+
+        if self.compact_player_panels:
+            self.top_frame.grid_remove()
+            self.left_frame.grid_remove()
+            self.right_frame.grid_remove()
+            self.bottom_panel_container = tk.Frame(self.bottom_frame, name="bottom_panel_container", bg=self.theme["panel"])
+            self.bottom_panel_container.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+            self.bottom_panel_container.grid_columnconfigure(0, weight=1)
+            self.bottom_panel_container.grid_columnconfigure(1, weight=0)
+            self.player_panel_container = tk.Frame(self.bottom_panel_container, name="player_panel_container", bg=self.theme["panel"])
+            self.player_panel_container.grid(row=0, column=0, sticky="nsew")
+            self.log_panel_container = tk.Frame(self.bottom_panel_container, name="log_panel_container", bg=self.theme["panel"])
+            self.log_panel_container.grid(row=0, column=1, sticky="nsew")
+            self.log_panel_container.grid_remove()
+            self.player_panel_main = tk.Frame(self.player_panel_container, name="player_panel_main", bg=self.theme["panel"])
+            self.player_panel_main.pack(fill="x", pady=(0, 6))
+            self.player_panel_carousel = tk.Frame(self.player_panel_container, name="player_panel_carousel", bg=self.theme["panel"])
+            self.player_panel_carousel.pack(fill="both", expand=True)
+
+    def toggle_pause_menu(self, _event=None) -> None:
+        if not self.is_pause_allowed():
+            return
+        if self.pause_menu_visible:
+            self.close_pause_menu()
+        else:
+            self.open_pause_menu()
+
+    def stop_menu_audio(self) -> None:
+        self.stop_main_theme()
+
+    def is_pause_allowed(self) -> bool:
+        if not getattr(self, "game", None):
+            return False
+        if not hasattr(self, "main_frame") or not self.main_frame.winfo_exists():
+            return False
+        if getattr(self, "setup_frame", None) and self.setup_frame.winfo_exists():
+            return False
+        if getattr(self, "naming_frame", None) and self.naming_frame.winfo_exists():
+            return False
+        if getattr(self, "profiles_frame", None) and self.profiles_frame.winfo_exists():
+            return False
+        if getattr(self, "splash_frame", None) and self.splash_frame.winfo_exists():
+            return False
+        if getattr(self, "title_splash_frame", None) and self.title_splash_frame.winfo_exists():
+            return False
+        return True
+
+    def open_pause_menu(self) -> None:
+        if self.pause_menu_frame and self.pause_menu_frame.winfo_exists():
+            self.pause_menu_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.pause_menu_frame.lift()
+            self.pause_menu_visible = True
+            return
+        self.pause_menu_frame = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        self.pause_menu_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.pause_menu_frame.lift()
+        self.pause_menu_visible = True
+
+        menu_card = tk.Frame(self.pause_menu_frame, bg=self.theme["panel"])
+        menu_card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.6, relheight=0.7)
+
+        title = tk.Label(
+            menu_card,
+            text="Paused",
+            font=self.theme["header_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+        )
+        title.pack(pady=(12, 4))
+
+        buttons = tk.Frame(menu_card, bg=self.theme["panel"])
+        buttons.pack(pady=(0, 10))
+        def pause_ui_image(key: str) -> tk.PhotoImage | None:
+            img = self.ui_images.get(key)
+            if not img:
+                return None
+            return self.scale_image_percent(img, 0.5)
+
+        back_img = pause_ui_image("back")
+        back_btn = tk.Button(
+            buttons,
+            text="" if back_img else "Return to Game",
+            image=back_img,
+            command=self.close_pause_menu,
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if back_img:
+            back_btn.image = back_img
+        back_btn.pack(side="left", padx=6)
+        options_img = pause_ui_image("options")
+        options_btn = tk.Button(
+            buttons,
+            text="" if options_img else "Options",
+            image=options_img,
+            command=lambda: self.show_pause_panel("options"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if options_img:
+            options_btn.image = options_img
+        options_btn.pack(side="left", padx=6)
+        video_img = pause_ui_image("video_tab")
+        video_btn = tk.Button(
+            buttons,
+            text="" if video_img else "Video",
+            image=video_img,
+            command=lambda: self.show_pause_panel("video"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if video_img:
+            video_btn.image = video_img
+        video_btn.pack(side="left", padx=6)
+        audio_img = pause_ui_image("audio_tab")
+        audio_btn = tk.Button(
+            buttons,
+            text="" if audio_img else "Audio",
+            image=audio_img,
+            command=lambda: self.show_pause_panel("audio"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if audio_img:
+            audio_btn.image = audio_img
+        audio_btn.pack(side="left", padx=6)
+        achievements_img = pause_ui_image("achievements")
+        achievements_btn = tk.Button(
+            buttons,
+            text="" if achievements_img else "Achievements",
+            image=achievements_img,
+            command=lambda: self.show_pause_panel("achievements"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if achievements_img:
+            achievements_btn.image = achievements_img
+        achievements_btn.pack(side="left", padx=6)
+        exit_img = pause_ui_image("exit")
+        exit_btn = tk.Button(
+            buttons,
+            text="" if exit_img else "Exit Game",
+            image=exit_img,
+            command=self.pause_exit_game,
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=4,
+        )
+        if exit_img:
+            exit_btn.image = exit_img
+        exit_btn.pack(side="left", padx=6)
+
+        self.pause_menu_panel = tk.Frame(menu_card, bg=self.theme["panel_dark"])
+        self.pause_menu_panel.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        self.pause_options_frame = tk.Frame(self.pause_menu_panel, bg=self.theme["panel_dark"])
+        self.pause_audio_frame = tk.Frame(self.pause_menu_panel, bg=self.theme["panel_dark"])
+        self.pause_video_frame = tk.Frame(self.pause_menu_panel, bg=self.theme["panel_dark"])
+        self.pause_achievements_frame = tk.Frame(self.pause_menu_panel, bg=self.theme["panel_dark"])
+
+        tk.Label(
+            self.pause_options_frame,
+            text="Game Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(6, 4))
+        tk.Checkbutton(
+            self.pause_options_frame,
+            text="Speed",
+            variable=self.speed_var,
+            command=self.on_toggle_speed,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["panel_dark"],
+        ).pack(anchor="w", pady=(0, 4))
+        if self.debug_enabled:
+            tk.Checkbutton(
+                self.pause_options_frame,
+                text="Debug",
+                variable=self.debug_var,
+                command=self.on_toggle_debug,
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+                selectcolor=self.theme["panel"],
+                activebackground=self.theme["panel_dark"],
+            ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            self.pause_audio_frame,
+            text="Audio Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(6, 4))
+        tk.Checkbutton(
+            self.pause_audio_frame,
+            text="Mute",
+            variable=self.mute_var,
+            command=self.on_toggle_mute,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["panel_dark"],
+        ).pack(anchor="w", pady=(0, 4))
+        volume_row = tk.Frame(self.pause_audio_frame, bg=self.theme["panel_dark"])
+        volume_row.pack(anchor="w", pady=(0, 4))
+        tk.Label(
+            volume_row,
+            text="Volume",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        self.create_image_slider(
+            volume_row,
+            self.volume_var,
+            0,
+            100,
+            length=180,
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            on_change=self.on_volume_change,
+            show_value=True,
+        ).pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            self.pause_video_frame,
+            text="Video Options",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(6, 4))
+        tk.Checkbutton(
+            self.pause_video_frame,
+            text="Full Screen",
+            variable=self.fullscreen_var,
+            command=self.apply_display_mode,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["panel_dark"],
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            self.pause_achievements_frame,
+            text="Achievements",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", pady=(6, 4))
+        self.achievement_canvas = tk.Canvas(
+            self.pause_achievements_frame,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+        )
+        self.achievement_scrollbar = tk.Scrollbar(
+            self.pause_achievements_frame, orient="vertical", command=self.achievement_canvas.yview, width=16
+        )
+        self.achievement_canvas.configure(yscrollcommand=self.achievement_scrollbar.set)
+        self.achievement_canvas.pack(side="left", fill="both", expand=True, padx=4, pady=(0, 6))
+        self.achievement_scrollbar.pack(side="right", fill="y", pady=(0, 6))
+        self.achievement_icon_frame = tk.Frame(self.achievement_canvas, bg=self.theme["panel_dark"])
+        self.achievement_canvas_window = self.achievement_canvas.create_window(
+            (0, 0), window=self.achievement_icon_frame, anchor="nw"
+        )
+        self.achievement_icon_frame.bind(
+            "<Configure>", lambda _e: self.achievement_canvas.configure(scrollregion=self.achievement_canvas.bbox("all"))
+        )
+        self.refresh_achievement_panel()
+
+        self.show_pause_panel("options")
+
+    def show_pause_panel(self, panel: str) -> None:
+        if not self.pause_menu_panel:
+            return
+        for child in self.pause_menu_panel.winfo_children():
+            child.pack_forget()
+        if panel == "audio":
+            self.pause_audio_frame.pack(fill="both", expand=True)
+        elif panel == "video":
+            self.pause_video_frame.pack(fill="both", expand=True)
+        elif panel == "achievements":
+            self.pause_achievements_frame.pack(fill="both", expand=True)
+            self.refresh_achievement_panel()
+        else:
+            self.pause_options_frame.pack(fill="both", expand=True)
+
+    def close_pause_menu(self) -> None:
+        if self.pause_menu_frame and self.pause_menu_frame.winfo_exists():
+            self.pause_menu_frame.place_forget()
+            self.pause_menu_visible = False
+
+    def _build_center_panel(self) -> None:
+        self.center_frame.grid_propagate(False)
+        self.set_center_frame_size()
+
+        self.top_area = tk.Frame(self.center_frame, name="top_area", bg=self.theme["panel_dark"])
+        self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+
+        self.info_label = tk.Label(
+            self.top_area,
+            name="roll_info_label",
+            text="",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            justify="center",
+            anchor="center",
+        )
+        self.info_label.pack(anchor="center", fill="x")
+
+        self.status_label = tk.Label(
+            self.top_area,
+            name="roll_status_label",
+            text="",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+            justify="center",
+            anchor="center",
+        )
+        self.status_label.pack(anchor="center", fill="x", pady=(0, 5))
+
+        self.hand_frame = tk.Frame(self.top_area, name="hand_frame", bg=self.theme["panel_dark"])
+        self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.hand_frame.pack_propagate(False)
+        self.hand_frame.config(height=self.hand_display_height)
+
+        self.controls_frame = tk.Frame(self.center_frame, name="controls_frame", bg=self.theme["panel_dark"])
+        self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.controls_row = tk.Frame(self.controls_frame, name="controls_row", bg=self.theme["panel_dark"])
+        self.controls_row.pack(anchor="center")
+        self.controls_row_secondary = tk.Frame(self.controls_frame, name="controls_row_secondary", bg=self.theme["panel_dark"])
+        self.controls_row_secondary.pack(anchor="center", pady=(4, 0))
+
+        reroll_img = self.ui_images.get("reroll")
+        self.reroll_button = tk.Button(
+            self.controls_row,
+            text="Reroll Selected" if not reroll_img else "",
+            image=reroll_img,
+            command=self.on_reroll,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if reroll_img:
+            self.reroll_button.image = reroll_img
+        self.reroll_button.pack(side="left")
+
+        score_img = self.ui_images.get("score_turn")
+        self.end_turn_button = tk.Button(
+            self.controls_row,
+            text="Score & End Turn" if not score_img else "",
+            image=score_img,
+            command=self.on_end_turn,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if score_img:
+            self.end_turn_button.image = score_img
+        self.end_turn_button.pack(side="left", padx=5)
+
+        view_bag_img = self.ui_images.get("view_bag")
+        self.bag_button = tk.Button(
+            self.controls_row_secondary,
+            text="Show Bag" if not view_bag_img else "",
+            image=view_bag_img,
+            command=self.on_show_bag,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if view_bag_img:
+            self.bag_button.image = view_bag_img
+        self.bag_button.pack(side="left", padx=5)
+
+        scorecard_img = self.ui_images.get("scorecard")
+        self.scorecard_button = tk.Button(
+            self.controls_row_secondary,
+            text="Show Scorecard" if not scorecard_img else "",
+            image=scorecard_img,
+            command=self.toggle_scorecard,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if scorecard_img:
+            self.scorecard_button.image = scorecard_img
+        self.scorecard_button.pack(side="left", padx=5)
+
+        self.nimble_button = tk.Button(
+            self.controls_row,
+            text="Apply Nimble Reroll" if not self.ui_images.get("nimble_roll") else "",
+            image=self.ui_images.get("nimble_roll"),
+            command=self.apply_nimble_reroll,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if self.ui_images.get("nimble_roll"):
+            self.nimble_button.image = self.ui_images.get("nimble_roll")
+        # Hidden; Nimble Cat is activated via inventory click.
+        self.nimble_button.config(state="disabled")
+
+        sort_img = self.ui_images.get("sort")
+        self.sort_button = tk.Button(
+            self.controls_row,
+            text="Sort Dice" if not sort_img else "",
+            image=sort_img,
+            command=self.sort_hand_by_value,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if sort_img:
+            self.sort_button.image = sort_img
+        self.sort_button.pack(side="left", padx=5)
+
+        self.cat_frame = tk.Frame(self.center_frame, name="cat_frame", bg=self.theme["panel_dark"])
+        self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.cat_label = None
+        self.cat_buttons_frame = tk.Frame(self.cat_frame, name="cat_buttons_frame", bg=self.theme["panel_dark"])
+        self.cat_buttons_frame.pack(fill="x")
+
+        self.shop_backdrop = tk.Frame(self.table_frame, name="shop_backdrop", bg=self.theme["shop_bg"])
+        self.shop_frame = tk.Frame(self.shop_backdrop, name="shop_frame", bg=self.theme["shop_bg"])
+
+        self.shop_overlay = tk.Frame(self.shop_backdrop, name="shop_overlay", bg=self.theme["panel_dark"])
+        self.shop_overlay_visible = False
+
+        self.log_frame = tk.Frame(self.center_frame, name="log_frame", bg=self.theme["panel_dark"])
+        tk.Label(
+            self.log_frame,
+            text="Game Log",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w")
+        self.log_text = tk.Text(
+            self.log_frame,
+            height=8,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+        )
+        self.log_text.pack(fill="both", expand=True)
+        self.log_text.tag_configure("log", foreground=self.theme["text"])
+        self.make_text_readonly(self.log_text)
+
+        self.rulebook_frame = tk.Frame(self.center_frame, name="rulebook_frame", bg=self.theme["bg"])
+        self.rulebook_label = tk.Label(
+            self.rulebook_frame,
+            text="Rulebook",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        )
+        self.rulebook_label.pack(anchor="center")
+        self.rulebook_body = tk.Frame(self.rulebook_frame, bg=self.theme["bg"])
+        self.rulebook_body.pack(fill="both", expand=True)
+        self.rulebook_scrollbar = tk.Scrollbar(
+            self.rulebook_body,
+            orient="vertical",
+            width=0,
+            bg=self.theme["bg"],
+            troughcolor=self.theme["bg"],
+            activebackground=self.theme["bg"],
+            highlightbackground=self.theme["bg"],
+            relief="flat",
+            borderwidth=0,
+        )
+        self.rulebook_text = tk.Text(
+            self.rulebook_body,
+            height=16,
+            wrap="word",
+            state="disabled",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            yscrollcommand=self.rulebook_scrollbar.set,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.rulebook_scrollbar.config(command=self.rulebook_text.yview)
+        self.rulebook_text.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        self.rulebook_scrollbar.pack(side="right", fill="y")
+
+        self.scorecard_frame = tk.Frame(self.center_frame, name="scorecard_frame", bg=self.theme["bg"])
+        self.scorecard_label = tk.Label(
+            self.scorecard_frame,
+            text="Scorecard",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        )
+        self.scorecard_label.pack(anchor="center")
+        self.scorecard_text = tk.Text(
+            self.scorecard_frame,
+            height=10,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            highlightbackground=self.theme["bg"],
+            highlightcolor=self.theme["bg"],
+        )
+        self.scorecard_text.pack(fill="both", expand=True)
+        self.make_text_readonly(self.scorecard_text)
+
+        self.dice_bank_frame = tk.Frame(self.center_frame, name="dice_bank_frame", bg=self.theme["panel_dark"])
+        self.dice_bank_header = tk.Frame(self.dice_bank_frame, bg=self.theme["panel_dark"])
+        self.dice_bank_header.pack(fill="x", pady=0)
+        self.dice_bank_header.grid_columnconfigure(1, weight=1)
+        self.dice_bank_title = tk.Label(
+            self.dice_bank_header,
+            text="Dice Bank",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        self.dice_bank_title.grid(row=0, column=0, sticky="w", padx=10)
+        self.dice_bank_info = tk.Label(
+            self.dice_bank_frame,
+            text="Select 2 dice to add to your bag.",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        self.dice_bank_info.pack(anchor="center", pady=(0, 5))
+        self.dice_bank_target_row = tk.Frame(self.dice_bank_frame, bg=self.theme["panel_dark"])
+        self.dice_bank_target_label = tk.Label(
+            self.dice_bank_target_row,
+            text="Give to:",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        self.dice_bank_target_label.pack(side="left", padx=(0, 6))
+        self.dice_bank_target_var = tk.StringVar(value="")
+        self.dice_bank_target_menu = tk.OptionMenu(self.dice_bank_target_row, self.dice_bank_target_var, "")
+        self.dice_bank_target_menu.config(
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.dice_bank_target_menu.pack(side="left")
+        self.dice_bank_target_row.pack_forget()
+        self.dice_bank_buttons = tk.Frame(self.dice_bank_frame, bg=self.theme["panel_dark"])
+        self.dice_bank_buttons.pack(anchor="center", pady=5, fill="x")
+        self.dice_bank_buttons_inner = tk.Frame(self.dice_bank_buttons, bg=self.theme["panel_dark"])
+        self.dice_bank_buttons_inner.pack(anchor="center")
+        self.dice_bank_counts = {}
+        self.dice_bank_faces = {}
+        row = tk.Frame(self.dice_bank_buttons_inner, bg=self.theme["panel_dark"])
+        row.pack(anchor="center", pady=1)
+        for color in BASE_COLORS:
+            cell = tk.Frame(row, bg=self.theme["panel_dark"])
+            cell.pack(side="left", padx=6)
+            plus_img = self.ui_images.get("plus")
+            tk.Label(
+                cell,
+                text=color.title(),
+                anchor="center",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            ).pack()
+            btn = tk.Button(
+                cell,
+                text="+" if not plus_img else "",
+                image=plus_img,
+                command=lambda c=color: self.add_dice_bank_choice(c),
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+            if plus_img:
+                btn.image = plus_img
+            btn.pack(pady=(2, 0))
+            count_label = tk.Label(
+                cell,
+                text="0",
+                width=4,
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            )
+            count_label.pack()
+            self.dice_bank_counts[color] = count_label
+            face_label = tk.Label(cell, bg=self.theme["panel_dark"])
+            face_label.pack(pady=(2, 0))
+            self.dice_bank_faces[color] = face_label
+        self.dice_bank_actions = tk.Frame(self.dice_bank_header, bg=self.theme["panel_dark"])
+        self.dice_bank_actions.grid(row=0, column=2, sticky="e", padx=10)
+        self.dice_bank_actions_row = tk.Frame(self.dice_bank_actions, bg=self.theme["panel_dark"])
+        self.dice_bank_actions_row.pack(anchor="center")
+        draft_img = self.ui_images.get("draft")
+        back_img = self.ui_images.get("back")
+        reset_img = self.ui_images.get("reset")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        reset_btn = tk.Button(
+            self.dice_bank_actions_row,
+            text="Reset" if not reset_img else "",
+            image=reset_img,
+            command=self.reset_dice_bank_selection,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if reset_img:
+            reset_btn.image = reset_img
+        reset_btn.pack(side="left", padx=4)
+        confirm_btn = tk.Button(
+            self.dice_bank_actions_row,
+            text="Confirm" if not draft_img else "",
+            image=draft_img,
+            command=self.confirm_dice_bank,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if draft_img:
+            confirm_btn.image = draft_img
+        confirm_btn.pack(side="left", padx=4)
+        cancel_btn = tk.Button(
+            self.dice_bank_actions_row,
+            text="Cancel" if not back_img else "",
+            image=back_img,
+            command=self.cancel_dice_bank,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if back_img:
+            cancel_btn.image = back_img
+        cancel_btn.pack(side="left", padx=4)
+
+        self.bag_view_frame = tk.Frame(self.center_frame, name="bag_view_frame", bg=self.theme["panel_dark"])
+        self.bag_view_header = tk.Frame(self.bag_view_frame, bg=self.theme["panel_dark"])
+        self.bag_view_header.pack(fill="x", pady=0)
+        self.bag_view_header.grid_columnconfigure(0, weight=1)
+        self.bag_view_header.grid_columnconfigure(1, weight=0)
+        self.bag_view_header.grid_columnconfigure(2, weight=1)
+        self.bag_view_title = tk.Label(
+            self.bag_view_header,
+            text="Bag View",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        self.bag_view_title.grid(row=0, column=1, sticky="n")
+        self.bag_view_target_row = tk.Frame(self.bag_view_header, bg=self.theme["panel_dark"])
+        self.bag_view_target_row.grid(row=0, column=0, sticky="w", padx=10)
+        tk.Label(
+            self.bag_view_target_row,
+            text="Target:",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(side="left", padx=(0, 6))
+        self.bag_view_target_var = tk.StringVar(value="")
+        self.bag_view_target_menu = tk.OptionMenu(self.bag_view_target_row, self.bag_view_target_var, "")
+        self.bag_view_target_menu.config(
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            activebackground=self.theme["panel_dark"],
+            highlightthickness=0,
+        )
+        self.bag_view_target_menu.pack(side="left")
+        self.bag_view_target_row.grid_remove()
+        self.bag_view_hint = tk.Label(
+            self.bag_view_frame,
+            text="",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        self.bag_view_hint.pack(anchor="center", pady=(0, 5))
+        self.bag_view_body = tk.Frame(self.bag_view_frame, bg=self.theme["panel_dark"])
+        self.bag_view_body.pack(fill="both", expand=True, pady=5)
+        self.bag_view_body.grid_rowconfigure(0, weight=1)
+        self.bag_view_body.grid_columnconfigure(0, weight=1)
+        self.bag_view_canvas = tk.Canvas(
+            self.bag_view_body,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+        )
+        self.bag_view_scrollbar = tk.Scrollbar(
+            self.bag_view_body,
+            orient="vertical",
+            command=self.bag_view_canvas.yview,
+        )
+        self.bag_view_canvas.configure(yscrollcommand=self.bag_view_scrollbar.set)
+        self.bag_view_canvas.grid(row=0, column=0, sticky="nsew")
+        self.bag_view_content = tk.Frame(self.bag_view_canvas, bg=self.theme["panel_dark"])
+        self.bag_view_canvas_window = self.bag_view_canvas.create_window(
+            (0, 0), window=self.bag_view_content, anchor="n"
+        )
+        self.bag_view_actions = tk.Frame(self.bag_view_header, bg=self.theme["panel_dark"])
+        self.bag_view_actions.grid(row=0, column=2, sticky="e", padx=10)
+        self.bag_view_actions_row = tk.Frame(self.bag_view_actions, bg=self.theme["panel_dark"])
+        self.bag_view_actions_row.pack(anchor="center")
+        yes_img = self.profile_action_images.get("yes") if hasattr(self, "profile_action_images") else None
+        convert_img = self.ui_images.get("convert")
+        back_img = self.ui_images.get("back")
+        close_img = self.ui_images.get("close")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        self.bag_view_confirm = tk.Button(
+            self.bag_view_actions_row,
+            text="Discard Selected" if not yes_img else "",
+            image=yes_img,
+            command=self.confirm_bag_discard,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if yes_img:
+            self.bag_view_confirm.image = yes_img
+        close_img = close_img or back_img
+        self.bag_view_close = tk.Button(
+            self.bag_view_actions_row,
+            text="Close" if not close_img else "",
+            image=close_img,
+            command=self.close_bag_view,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if close_img:
+            self.bag_view_close.image = close_img
+        self.bag_view_confirm.pack(side="left", padx=4)
+        self.bag_view_close.pack(side="left", padx=4)
+
+        self.cat_burglar_frame = tk.Frame(self.center_frame, name="cat_burglar_frame", bg=self.theme["panel_dark"])
+        self.cat_burglar_title = tk.Label(
+            self.cat_burglar_frame,
+            text="Cat Burglar",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        self.cat_burglar_title.pack(anchor="center")
+        self.cat_burglar_hint = tk.Label(
+            self.cat_burglar_frame,
+            text="Select a dog card to steal from an AI player.",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        self.cat_burglar_hint.pack(anchor="center", pady=(0, 5))
+        self.cat_burglar_list = tk.Frame(self.cat_burglar_frame, bg=self.theme["panel_dark"])
+        self.cat_burglar_list.pack(anchor="center", fill="both", expand=True, pady=5)
+        self.cat_burglar_actions = tk.Frame(self.cat_burglar_frame, bg=self.theme["panel_dark"])
+        self.cat_burglar_actions.pack(anchor="center", pady=5)
+        self.cat_burglar_confirm = tk.Button(
+            self.cat_burglar_actions,
+            text="Steal Selected" if not self.ui_images.get("steal_selected") else "",
+            image=self.ui_images.get("steal_selected"),
+            command=self.confirm_cat_burglar,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if self.ui_images.get("steal_selected"):
+            self.cat_burglar_confirm.image = self.ui_images.get("steal_selected")
+        self.cat_burglar_cancel = tk.Button(
+            self.cat_burglar_actions,
+            text="Cancel" if not self.ui_images.get("cancel") else "",
+            image=self.ui_images.get("cancel"),
+            command=self.cancel_cat_burglar,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if self.ui_images.get("cancel"):
+            self.cat_burglar_cancel.image = self.ui_images.get("cancel")
+        self.cat_burglar_confirm.pack(side="left", padx=4)
+        self.cat_burglar_cancel.pack(side="left", padx=4)
+
+        self.end_game_frame = tk.Frame(self.center_frame, name="end_game_frame", bg=self.theme["panel_dark"])
+        results_img = self.ui_images.get("results")
+        if results_img:
+            self.end_game_label = tk.Label(
+                self.end_game_frame,
+                image=results_img,
+                bg=self.theme["panel_dark"],
+            )
+            self.end_game_label.image = results_img
+        else:
+            self.end_game_label = tk.Label(
+                self.end_game_frame,
+                text="Game Over",
+                font=self.theme["subheader_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            )
+        self.end_game_label.pack(anchor="center")
+        self.end_game_actions = tk.Frame(self.end_game_frame, bg=self.theme["panel_dark"])
+        self.end_game_actions.pack(anchor="center", pady=(2, 6))
+        return_title_img = self.ui_images.get("return_to_title")
+        return_title_btn = tk.Button(
+            self.end_game_actions,
+            text="Return to Title" if not return_title_img else "",
+            image=return_title_img,
+            command=lambda: self.open_kibble_bank("return"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if return_title_img:
+            return_title_btn.image = return_title_img
+        return_title_btn.pack(side="left", padx=4)
+        new_game_img = self.ui_images.get("new_game")
+        self.end_game_new_game_img = new_game_img
+        self.end_game_new_game_img_disabled = (
+            self.make_grayscale_image(new_game_img) if new_game_img else None
+        )
+        self.end_game_new_game_btn = tk.Button(
+            self.end_game_actions,
+            text="Play Another 9 Rounds" if not new_game_img else "",
+            image=new_game_img,
+            command=lambda: self.open_kibble_bank("continue"),
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if new_game_img:
+            self.end_game_new_game_btn.image = new_game_img
+        self.end_game_new_game_btn.pack(side="left", padx=4)
+        self.end_game_rank_frame = tk.Frame(self.end_game_frame, bg=self.theme["panel_dark"])
+        self.end_game_rank_frame.pack(anchor="center", pady=(0, 6))
+        self.end_game_text = tk.Text(
+            self.end_game_frame,
+            height=18,
+            wrap="word",
+            state="disabled",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+        )
+        self.end_game_text.pack(fill="both", expand=True)
+        self.end_game_text.tag_configure("center", justify="center")
+
+        self.credits_frame = tk.Frame(self.center_frame, name="credits_frame", bg=self.theme["panel_dark"])
+        self.credits_title = tk.Label(
+            self.credits_frame,
+            text="Congratulations! You have won Cats Dogs and Dice!",
+            font=self.theme["header_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            wraplength=900,
+            justify="center",
+        )
+        self.credits_title.pack(anchor="center", pady=(12, 6))
+        self.credits_canvas = tk.Canvas(
+            self.credits_frame,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+            bd=0,
+        )
+        self.credits_canvas.pack(fill="both", expand=True, padx=24, pady=(0, 6))
+        self.credits_actions = tk.Frame(self.credits_frame, bg=self.theme["panel_dark"])
+        self.credits_actions.pack(anchor="center", pady=(0, 10))
+        return_title_img = self.ui_images.get("return_to_title")
+        if return_title_img:
+            btn = tk.Button(
+                self.credits_actions,
+                image=return_title_img,
+                command=self.restart_to_setup,
+                bg=self.theme["panel_dark"],
+                activebackground=self.theme["panel_dark"],
+                relief="flat",
+                borderwidth=0,
+                padx=10,
+                pady=4,
+            )
+            btn.image = return_title_img
+        else:
+            btn = tk.Button(
+                self.credits_actions,
+                text="Return to Title",
+                command=self.restart_to_setup,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=14,
+                pady=6,
+            )
+        btn.pack()
+        self.credits_text_id = None
+        self.credits_scroll_job = None
+
+        self.table_labels = []
+        frames = [self.bottom_frame, self.top_frame, self.left_frame, self.right_frame]
+        for frame in frames:
+            slot = tk.Frame(frame, bg=self.theme["panel"])
+            slot.pack(fill="both", expand=True, padx=6, pady=6)
+            self.table_labels.append(slot)
+
+        self.dice_vars: List[tk.BooleanVar] = []
+        self.dice_checks: List[tk.Checkbutton] = []
+        self.dice_frames: List[tk.Frame] = []
+        self.reveal_job = None
+        self.drag_index = None
+        self.drag_preview = None
+        self.drag_preview_image = None
+        self.drag_preview_offset = (0, 0)
+        self.drag_hidden_widget = None
+        self.drag_hidden_image = None
+        self.drag_hidden_text = None
+        self.drag_hidden_width = None
+        self.drag_hidden_height = None
+        self.drag_hidden_select_image = None
+        self.drag_hidden_active_image = None
+        self.drag_transparent_image = None
+        self.drag_cover = None
+        self.drag_cover_index = None
+        self.reroll_drop_frame = None
+        self.reroll_drop_canvas = None
+        self.reroll_drop_items = []
+        self.reroll_set_aside = set()
+        self.reroll_set_aside_order = []
+        self.lock_window_size()
+
+    def lock_window_size(self) -> None:
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        if width > 0 and height > 0:
+            self.root.geometry(f"{width}x{height}")
+
+    def set_screen_safe_geometry(
+        self,
+        window: tk.Toplevel | tk.Tk,
+        width: int,
+        height: int,
+        x: int = 0,
+        y: int = 0,
+    ) -> None:
+        screen_w = max(1, window.winfo_screenwidth())
+        screen_h = max(1, window.winfo_screenheight())
+        fit_w = max(320, min(int(width), screen_w - 40))
+        fit_h = max(240, min(int(height), screen_h - 80))
+        fit_x = max(0, min(int(x), max(0, screen_w - fit_w)))
+        fit_y = max(0, min(int(y), max(0, screen_h - fit_h)))
+        window.geometry(f"{fit_w}x{fit_h}+{fit_x}+{fit_y}")
+
+    def on_root_configure(self, event=None) -> None:
+        if event is not None and getattr(event, "widget", None) is not self.root:
+            return
+        if self._layout_refresh_job:
+            try:
+                self.root.after_cancel(self._layout_refresh_job)
+            except Exception:
+                pass
+        self._layout_refresh_job = self.root.after(40, self.refresh_responsive_layout)
+
+    def refresh_responsive_layout(self) -> None:
+        self._layout_refresh_job = None
+        center = getattr(self, "center_frame", None)
+        if center and center.winfo_exists():
+            self.set_center_frame_size()
+        roll_pady = self.get_roll_section_pady()
+        for widget in (
+            getattr(self, "hand_frame", None),
+            getattr(self, "controls_frame", None),
+            getattr(self, "cat_frame", None),
+        ):
+            if widget and widget.winfo_exists():
+                try:
+                    widget.pack_configure(pady=roll_pady)
+                except tk.TclError:
+                    pass
+        hand_frame = getattr(self, "hand_frame", None)
+        if hand_frame and hand_frame.winfo_exists():
+            try:
+                hand_frame.config(height=max(self.calculate_hand_display_height(), 44))
+            except tk.TclError:
+                pass
+        top_area = getattr(self, "top_area", None)
+        if top_area and top_area.winfo_exists():
+            try:
+                top_area.pack_configure(pady=(0, roll_pady))
+            except tk.TclError:
+                pass
+        if getattr(self, "shop_layout_active", False):
+            self.update_shop_layout_geometry()
+        if getattr(self, "bag_view_active", False):
+            self.ensure_bag_view_action_space()
+        if getattr(self, "end_game_active", False):
+            self.render_end_game_ranks()
+            if hasattr(self, "end_game_text") and self.end_game_text.winfo_exists():
+                self.end_game_text.configure(height=int(self.density("end_text_height", 18)))
+        self.schedule_layout_debug_refresh()
+
+    def schedule_layout_debug_refresh(self) -> None:
+        if not getattr(self, "layout_debug_enabled", False):
+            return
+        if getattr(self, "layout_debug_job", None):
+            try:
+                self.root.after_cancel(self.layout_debug_job)
+            except Exception:
+                pass
+        self.layout_debug_job = self.root.after(60, self.refresh_layout_debug_overlay)
+
+    def clear_layout_debug_overlay(self) -> None:
+        if getattr(self, "layout_debug_job", None):
+            try:
+                self.root.after_cancel(self.layout_debug_job)
+            except Exception:
+                pass
+            self.layout_debug_job = None
+        for marker in getattr(self, "layout_debug_markers", []):
+            try:
+                if marker.winfo_exists():
+                    marker.destroy()
+            except tk.TclError:
+                pass
+        self.layout_debug_markers = []
+        summary = getattr(self, "layout_debug_summary", None)
+        if summary:
+            try:
+                if summary.winfo_exists():
+                    summary.destroy()
+            except tk.TclError:
+                pass
+        self.layout_debug_summary = None
+
+    def _layout_debug_has_canvas_ancestor(self, widget: tk.Widget) -> bool:
+        current = getattr(widget, "master", None)
+        while current is not None:
+            if isinstance(current, tk.Canvas):
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _layout_debug_widget_path(self, widget: tk.Widget) -> str:
+        try:
+            return str(widget)
+        except Exception:
+            return widget.__class__.__name__
+
+    def _collect_layout_overflow_issues(
+        self,
+        parent: tk.Widget,
+        issues: list[dict],
+        tolerance: int = 4,
+    ) -> None:
+        if not parent or not parent.winfo_exists():
+            return
+        try:
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+        except tk.TclError:
+            return
+        if pw <= 1 or ph <= 1:
+            return
+        for child in parent.winfo_children():
+            if not child.winfo_exists() or not child.winfo_ismapped():
+                continue
+            if getattr(child, "is_layout_debug_overlay", False):
+                continue
+            if self._layout_debug_has_canvas_ancestor(child):
+                continue
+            try:
+                cw = child.winfo_width()
+                ch = child.winfo_height()
+                cx = child.winfo_rootx()
+                cy = child.winfo_rooty()
+            except tk.TclError:
+                continue
+            if cw > 1 and ch > 1:
+                sides = {
+                    "left": cx < px - tolerance,
+                    "top": cy < py - tolerance,
+                    "right": cx + cw > px + pw + tolerance,
+                    "bottom": cy + ch > py + ph + tolerance,
+                }
+                if any(sides.values()):
+                    issues.append(
+                        {
+                            "widget": child,
+                            "parent": parent,
+                            "sides": sides,
+                            "cx": cx,
+                            "cy": cy,
+                            "cw": cw,
+                            "ch": ch,
+                        }
+                    )
+            self._collect_layout_overflow_issues(child, issues, tolerance=tolerance)
+
+    def _add_layout_debug_marker(self, x: int, y: int, width: int, height: int) -> None:
+        marker = tk.Frame(self.root, bg="#ff4d4d", bd=0, highlightthickness=0)
+        marker.is_layout_debug_overlay = True
+        marker.place(x=x, y=y, width=max(2, width), height=max(2, height))
+        marker.lift()
+        self.layout_debug_markers.append(marker)
+
+    def refresh_layout_debug_overlay(self) -> None:
+        self.layout_debug_job = None
+        self.clear_layout_debug_overlay()
+        if not getattr(self, "layout_debug_enabled", False):
+            return
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
+        issues: list[dict] = []
+        self._collect_layout_overflow_issues(self.root, issues)
+        if not issues:
+            summary = tk.Label(
+                self.root,
+                text="Layout audit: no overflow",
+                font=self.theme["small_font"],
+                bg="#204f2f",
+                fg="#ffffff",
+                padx=8,
+                pady=4,
+            )
+            summary.is_layout_debug_overlay = True
+            summary.place(relx=0.0, rely=0.0, anchor="nw", x=8, y=44)
+            summary.lift()
+            self.layout_debug_summary = summary
+            return
+
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        for issue in issues:
+            x = issue["cx"] - root_x
+            y = issue["cy"] - root_y
+            w = issue["cw"]
+            h = issue["ch"]
+            sides = issue["sides"]
+            if sides["left"]:
+                self._add_layout_debug_marker(max(0, x), max(0, y), 3, h)
+            if sides["right"]:
+                self._add_layout_debug_marker(max(0, x + w - 3), max(0, y), 3, h)
+            if sides["top"]:
+                self._add_layout_debug_marker(max(0, x), max(0, y), w, 3)
+            if sides["bottom"]:
+                self._add_layout_debug_marker(max(0, x), max(0, y + h - 3), w, 3)
+
+        lines = [f"Layout audit: {len(issues)} overflow widget(s)"]
+        for issue in issues[:8]:
+            widget_name = self._layout_debug_widget_path(issue["widget"])
+            active_sides = ", ".join(side for side, active in issue["sides"].items() if active)
+            lines.append(f"{widget_name} [{active_sides}]")
+        if len(issues) > 8:
+            lines.append(f"...and {len(issues) - 8} more")
+        summary = tk.Label(
+            self.root,
+            text="\n".join(lines),
+            justify="left",
+            anchor="nw",
+            font=self.theme["small_font"],
+            bg="#5a1f1f",
+            fg="#ffffff",
+            padx=8,
+            pady=6,
+        )
+        summary.is_layout_debug_overlay = True
+        summary.place(relx=0.0, rely=0.0, anchor="nw", x=8, y=44)
+        summary.lift()
+        self.layout_debug_summary = summary
+
+    def pause_exit_game(self) -> None:
+        self.close_pause_menu()
+        self.restart_to_setup()
+
+    def start_first_player_phase(self) -> None:
+        self.round_start_index = 0
+        self.first_roll_candidates = list(range(len(self.players)))
+        self.first_player_labels = {}
+        if hasattr(self, "top_area") and self.top_area.winfo_ismapped():
+            self.top_area.pack_forget()
+        if hasattr(self, "hand_frame") and self.hand_frame.winfo_ismapped():
+            self.hand_frame.pack_forget()
+        if hasattr(self, "controls_frame") and self.controls_frame.winfo_ismapped():
+            self.controls_frame.pack_forget()
+        if hasattr(self, "cat_frame") and self.cat_frame.winfo_ismapped():
+            self.cat_frame.pack_forget()
+        self.game_layout_active = False
+        if self.first_player_frame and self.first_player_frame.winfo_exists():
+            self.first_player_frame.destroy()
+        self.first_player_frame = tk.Frame(self.center_frame, name="first_player_frame", bg=self.theme["panel_dark"])
+        self.first_player_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.first_player_frame.lift()
+        title_img = self.ui_images.get("roll_title")
+        if title_img:
+            title = tk.Label(
+                self.first_player_frame,
+                name="first_player_title",
+                image=title_img,
+                bg=self.theme["panel_dark"],
+            )
+            title.image = title_img
+        else:
+            title = tk.Label(
+                self.first_player_frame,
+                name="first_player_title",
+                text="Roll Who Goes First",
+                font=self.theme["header_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            )
+        title.pack(pady=(6, 2))
+        self.first_roll_message = tk.Label(
+            self.first_player_frame,
+            name="first_player_message",
+            text="Each player rolls 1 die. Highest roll starts.",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        self.first_roll_message.pack(pady=(0, 6))
+        list_frame = tk.Frame(self.first_player_frame, bg=self.theme["panel_dark"])
+        list_frame.pack(fill="both", expand=True, pady=4)
+        list_frame.grid_columnconfigure(0, weight=1)
+        self.first_list_frame = list_frame
+        list_inner = tk.Frame(list_frame, bg=self.theme["panel_dark"])
+        list_inner.grid(row=0, column=0, sticky="n")
+        self.root.update_idletasks()
+        available_h = self.center_frame.winfo_height() or self.root.winfo_height()
+        reserved_h = 120
+        per_row = max(50, int((available_h - reserved_h) / max(len(self.players), 1)))
+        default_box = 80
+        for color in COLORS:
+            if self.dice_images.get(color):
+                sample = next(iter(self.dice_images[color].values()), None)
+                if sample:
+                    default_box = max(60, max(sample.width(), sample.height()) + 12)
+                break
+        box_size = max(50, min(default_box, per_row))
+        use_small_dice = box_size < default_box
+        self.first_roll_use_small = use_small_dice
+        icon_max = max(18, min(28, int(box_size * 0.5)))
+        for idx, player in enumerate(self.players):
+            row = tk.Frame(list_inner, bg=self.theme["panel_dark"])
+            row.pack(anchor="center", pady=2)
+            avatar_key = None
+            if hasattr(self, "player_avatar_keys") and idx < len(self.player_avatar_keys):
+                avatar_key = self.player_avatar_keys[idx]
+            if player.is_ai:
+                avatar_key = "ai"
+            if not avatar_key:
+                avatar_key = "they" if self.is_they_name(player.name) else "he"
+            icon = self.profile_icon_images.get(avatar_key)
+            if icon:
+                icon_display = self.scale_image_to_max(icon, icon_max)
+                icon_label = tk.Label(
+                    row,
+                    name=f"first_player_icon_{idx}",
+                    image=icon_display,
+                    bg=self.theme["panel_dark"],
+                )
+                icon_label.image = icon_display
+                icon_label.pack(side="left", padx=(0, 6))
+            name_lbl = tk.Label(
+                row,
+                name=f"first_player_name_{idx}",
+                text=player.name,
+                width=16,
+                anchor="w",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            )
+            name_lbl.pack(side="left", padx=(0, 8))
+            box = tk.Frame(
+                row,
+                width=box_size,
+                height=box_size,
+                bg=self.theme["panel_dark"],
+            )
+            box.pack_propagate(False)
+            box.pack(side="left")
+            roll_lbl = tk.Label(
+                box,
+                name=f"first_player_roll_{idx}",
+                text="-",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            )
+            roll_lbl.pack(expand=True)
+            self.first_player_labels[idx] = roll_lbl
+        roll_img = self.ui_images.get("roll")
+        self.first_roll_button = tk.Button(
+            self.first_player_frame,
+            text="Roll" if not roll_img else "",
+            image=roll_img,
+            command=self.roll_for_first_player,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg="white",
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=6,
+        )
+        if roll_img:
+            self.first_roll_button.image = roll_img
+        self.first_roll_button.pack(pady=(6, 4), before=list_frame)
+        self.first_continue_button = tk.Button(
+            self.first_player_frame,
+            text="Start" if not self.ui_images.get("start") else "",
+            image=self.ui_images.get("start"),
+            command=self.finish_first_player_phase,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["panel_dark"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=4,
+        )
+        if self.ui_images.get("start"):
+            self.first_continue_button.image = self.ui_images.get("start")
+        self.first_continue_button.place_forget()
+
+    def roll_for_first_player(self) -> None:
+        if not self.first_roll_candidates:
+            self.first_roll_candidates = list(range(len(self.players)))
+        if self.first_roll_button:
+            self.first_roll_button.config(state="disabled")
+        rolls = {}
+        for idx in self.first_roll_candidates:
+            roll = random.randint(1, 6)
+            color = random.choice(COLORS)
+            rolls[idx] = {"value": roll, "color": color}
+        if not rolls:
+            return
+        self.first_rolls = rolls
+        self.animate_first_rolls(steps=15)
+
+    def animate_first_rolls(self, steps: int) -> None:
+        if steps <= 0:
+            self.finish_first_rolls()
+            return
+        for idx, data in self.first_rolls.items():
+            color = data["color"]
+            value = random.randint(1, 6)
+            img_set = self.dice_images_small if getattr(self, "first_roll_use_small", False) else self.dice_images
+            img = img_set.get(color, {}).get(value)
+            lbl = self.first_player_labels.get(idx)
+            if not lbl:
+                continue
+            if img:
+                lbl.config(image=img, text="")
+                lbl.image = img
+            else:
+                lbl.config(text=f"{color} {value}")
+        self.root.after(100, lambda: self.animate_first_rolls(steps - 1))
+
+    def finish_first_rolls(self) -> None:
+        rolls = {idx: data["value"] for idx, data in self.first_rolls.items()}
+        for idx, data in self.first_rolls.items():
+            color = data["color"]
+            value = data["value"]
+            img_set = self.dice_images_small if getattr(self, "first_roll_use_small", False) else self.dice_images
+            img = img_set.get(color, {}).get(value)
+            lbl = self.first_player_labels.get(idx)
+            if not lbl:
+                continue
+            if img:
+                lbl.config(image=img, text="")
+                lbl.image = img
+            else:
+                lbl.config(text=f"{color} {value}")
+        top = max(rolls.values())
+        tied = [idx for idx, val in rolls.items() if val == top]
+        if len(tied) > 1:
+            self.first_roll_candidates = tied
+            if self.first_roll_message:
+                names = ", ".join(self.players[i].name for i in tied)
+                self.first_roll_message.config(text=f"Tie between {names}. Roll again.")
+            if self.first_roll_button:
+                self.first_roll_button.config(state="normal")
+            if self.first_continue_button:
+                self.first_continue_button.place_forget()
+            return
+        winner = tied[0]
+        self.round_start_index = winner
+        if self.first_roll_message:
+            self.first_roll_message.config(
+                text=f"{self.players[winner].name} goes first!"
+            )
+        if self.first_roll_button:
+            self.first_roll_button.pack_forget()
+        if self.first_continue_button:
+            self.first_continue_button.pack(
+                pady=(6, 8),
+                before=getattr(self, "first_list_frame", None),
+            )
+
+    def finish_first_player_phase(self) -> None:
+        if self.first_player_frame and self.first_player_frame.winfo_exists():
+            self.first_player_frame.destroy()
+        self.shop_order = self.build_clockwise_order(self.round_start_index)
+        self.start_round()
+
+    def start_round(self) -> None:
+        if not self.game:
+            return
+        if self.first_player_frame and self.first_player_frame.winfo_exists():
+            return
+        self.root.bind_all("<Escape>", self.toggle_pause_menu)
+        self.scores_this_round = []
+        self.game.turn_index = self.round_start_index
+        self.in_shop = False
+        self.update_pause_button_visibility()
+        for player in self.players:
+            player.free_cat_claims = 0
+            if player.blocked_dog_round == self.game.round_num:
+                has_blocked = player.blocked_dog_card in (player.dog_cards + player.stolen_dog_cards)
+                player.blocked_dog_active = bool(player.blocked_dog_card and has_blocked)
+                if not player.blocked_dog_active:
+                    player.blocked_dog_card = None
+                    player.blocked_dog_round = 0
+            else:
+                player.blocked_dog_active = False
+                if player.blocked_dog_round < self.game.round_num:
+                    player.blocked_dog_card = None
+                    player.blocked_dog_round = 0
+        self.exit_shop_layout()
+        self.restore_roll_phase_ui()
+        self.apply_roll_phase_theme()
+        self.ensure_roll_layout()
+        self.ensure_round_entry(self.game.round_num)
+        self.shop_order = self.build_clockwise_order(self.round_start_index)
+        self._start_turn()
+
+    def restore_roll_phase_ui(self) -> None:
+        if getattr(self, "kibble_bank_frame", None) and self.kibble_bank_frame.winfo_exists():
+            self.kibble_bank_frame.destroy()
+            self.kibble_bank_frame = None
+        if getattr(self, "end_game_frame", None) and self.end_game_frame.winfo_exists():
+            self.end_game_frame.pack_forget()
+        if getattr(self, "credits_frame", None) and self.credits_frame.winfo_exists():
+            self.credits_frame.pack_forget()
+        if getattr(self, "shop_frame", None) and self.shop_frame.winfo_exists():
+            self.shop_frame.place_forget()
+            self.shop_frame.pack_forget()
+        if getattr(self, "shop_backdrop", None) and self.shop_backdrop.winfo_exists():
+            self.shop_backdrop.place_forget()
+        self.shop_layout_active = False
+        self.hide_shop_overlay()
+        if getattr(self, "dice_bank_frame", None) and self.dice_bank_frame.winfo_exists():
+            self.dice_bank_frame.pack_forget()
+        if getattr(self, "bag_view_frame", None) and self.bag_view_frame.winfo_exists():
+            self.bag_view_frame.pack_forget()
+            self.bag_view_frame.place_forget()
+        if getattr(self, "cat_burglar_frame", None) and self.cat_burglar_frame.winfo_exists():
+            self.cat_burglar_frame.pack_forget()
+        self.dice_bank_active = False
+        self.bag_view_active = False
+        self.show_table_frames()
+        if self.compact_player_panels and getattr(self, "player_panel_container", None):
+            if not self.player_panel_container.winfo_ismapped():
+                self.player_panel_container.grid(row=0, column=0, sticky="nsew")
+        if not self.top_area.winfo_ismapped():
+            self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+        if not self.hand_frame.winfo_ismapped():
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.controls_frame.winfo_ismapped():
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.cat_frame.winfo_ismapped():
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.game_layout_active = True
+
+    def ensure_roll_layout(self) -> None:
+        self.show_table_frames()
+        if not self.top_area.winfo_ismapped():
+            self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+        if not self.hand_frame.winfo_ismapped():
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.controls_frame.winfo_ismapped():
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.cat_frame.winfo_ismapped():
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.game_layout_active = True
+
+    def set_center_frame_size(self) -> None:
+        self.root.update_idletasks()
+        if hasattr(self, "table_frame") and self.table_frame.winfo_exists():
+            avail_w = max(1, self.table_frame.winfo_width())
+            avail_h = max(1, self.table_frame.winfo_height())
+        else:
+            avail_w = max(1, self.root.winfo_width())
+            avail_h = max(1, self.root.winfo_height())
+        base_w = min(avail_w, max(420, int(avail_w * 0.96)))
+        height_ratio = 0.56 if self.compact_player_panels else 0.62
+        base_h = min(avail_h, max(250, int(avail_h * height_ratio)))
+        self.center_frame.config(width=base_w, height=base_h)
+
+    def calculate_hand_display_height(self) -> int:
+        max_height = 0
+        for color_images in self.dice_images.values():
+            for img in color_images.values():
+                if img:
+                    max_height = max(max_height, img.height())
+        if self.bag_image:
+            max_height = max(max_height, self.bag_image.height())
+        waste_img = self.ui_images.get("waste") if hasattr(self, "ui_images") and self.ui_images else None
+        if waste_img:
+            max_height = max(max_height, waste_img.height())
+        if max_height <= 0:
+            max_height = 80
+        return max_height + 18
+
+    def scale_image_to_fit(self, img: tk.PhotoImage, max_w: int, max_h: int) -> tk.PhotoImage | None:
+        if max_w <= 0 or max_h <= 0:
+            return None
+        width = img.width()
+        height = img.height()
+        if width <= 0 or height <= 0:
+            return None
+        scale = min(max_w / width, max_h / height)
+        if scale >= 1:
+            return img
+        factor = max(1, int(1 / scale + 0.5))
+        return img.subsample(factor, factor)
+
+    def build_grayscale_dice_images(self, images: dict) -> dict:
+        gray_images = {c: {} for c in images}
+        for color, values in images.items():
+            for value, img in values.items():
+                if img:
+                    gray_images[color][value] = self.make_grayscale_image(img)
+        return gray_images
+
+    def make_grayscale_image(self, img: tk.PhotoImage) -> tk.PhotoImage:
+        if Image and ImageTk:
+            try:
+                rgba = ImageTk.getimage(img).convert("RGBA")
+                gray_rgb = rgba.convert("L")
+                alpha = rgba.getchannel("A")
+                merged = Image.merge("RGBA", (gray_rgb, gray_rgb, gray_rgb, alpha))
+                return ImageTk.PhotoImage(merged)
+            except Exception:
+                pass
+        width = img.width()
+        height = img.height()
+        gray = tk.PhotoImage(width=width, height=height)
+        for y in range(height):
+            row_colors = []
+            for x in range(width):
+                try:
+                    if hasattr(img, "transparency_get") and img.transparency_get(x, y):
+                        row_colors.append("")
+                        continue
+                except tk.TclError:
+                    pass
+                color = img.get(x, y)
+                r, g, b = self.parse_color(color)
+                shade = int(0.299 * r + 0.587 * g + 0.114 * b)
+                row_colors.append(f"#{shade:02x}{shade:02x}{shade:02x}")
+            if row_colors:
+                gray.put("{" + " ".join(c if c else "{}" for c in row_colors) + "}", to=(0, y))
+        if hasattr(img, "transparency_get"):
+            for y in range(height):
+                for x in range(width):
+                    try:
+                        if img.transparency_get(x, y):
+                            gray.transparency_set(x, y, True)
+                    except tk.TclError:
+                        continue
+        return gray
+
+    def parse_color(self, color) -> tuple[int, int, int]:
+        if not color:
+            return (0, 0, 0)
+        if isinstance(color, tuple) and len(color) >= 3:
+            return (int(color[0]), int(color[1]), int(color[2]))
+        if color.startswith("#") and len(color) == 7:
+            return (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+        if " " in color:
+            parts = color.split()
+            if len(parts) >= 3:
+                return (int(parts[0]), int(parts[1]), int(parts[2]))
+        return (0, 0, 0)
+
+    def build_clockwise_order(self, start_index: int = 0) -> list[int]:
+        if len(self.players) == 4:
+            order = [start_index]
+            current = start_index
+            for _ in range(3):
+                current = self.next_clockwise_index(current)
+                order.append(current)
+            return order
+        base = list(range(len(self.players)))
+        if not base:
+            return []
+        start_index = start_index % len(base)
+        return base[start_index:] + base[:start_index]
+
+    def next_clockwise_index(self, current_index: int) -> int:
+        if len(self.players) == 4:
+            mapping = {3: 0, 0: 2, 2: 1, 1: 3}
+            return mapping.get(current_index, 0)
+        return (current_index + 1) % max(len(self.players), 1)
+
+    def get_shop_player_index(self) -> int | None:
+        if self.shop_player_index >= len(self.shop_order):
+            return None
+        return self.shop_order[self.shop_player_index]
+
+    def _start_turn(self) -> None:
+        game = self.game
+        if not game:
+            return
+        if game.turn_index >= len(self.players):
+            self.finish_round()
+            return
+        player = self.players[game.turn_index]
+        self.pending_cat_purchase = None
+        self.pending_dog_purchase = None
+        self.pending_cat_sale = None
+        pending_penalty = (
+            player.pending_roll_penalty
+            if player.pending_roll_penalty_round == game.round_num
+            else 0
+        )
+        pending_reroll_block = (
+            player.pending_reroll_block
+            and player.pending_reroll_block_round == game.round_num
+        )
+        self.in_shop = False
+        self.nimble_selecting = False
+        self.nimble_pending_card = None
+        self.devil_selecting = False
+        self.devil_pending_card = None
+        self.focus_selecting = False
+        self.focus_pending_card = None
+        self.focus_pending_player = None
+        self.hand_revealed = False
+        player.starlight_round = 0
+        self.momma_pending = 0
+        self.momma_uses = 0
+        self.auto_sorted_on_zero = False
+        self.scoring_highlight_indices = set()
+        self.score_confirm_pending = False
+        self.rolling_active = False
+        self.rolling_indices = set()
+        self.rolling_all = False
+        self.roll_finish_callback = None
+        self.reroll_button.config(state="disabled")
+        self.end_turn_button.config(state="disabled")
+        self.nimble_button.config(state="disabled")
+        game.start_turn(player)
+        if pending_penalty:
+            self.add_log(f"{player.name} rolls {pending_penalty} fewer dice this round.")
+            self.show_toast(f"{player.name} rolls {pending_penalty} fewer dice this round!")
+        if pending_reroll_block:
+            self.add_log(f"{player.name}'s rerolls are blocked this round.")
+            self.show_toast(f"{player.name} cannot reroll this round!")
+        self.update_info()
+        self.update_status()
+        self.update_table_view()
+        self.render_cat_actions()
+        if self.reveal_job:
+            self.root.after_cancel(self.reveal_job)
+        if player.is_ai and self.speed_var.get():
+            self.hand_revealed = True
+            self.render_hand()
+            self.update_status()
+            self.run_ai_cat_cards(player)
+            self.root.after(10, self.run_ai_turn)
+            return
+        self.show_jumbling()
+        self.reveal_job = self.root.after(4000, self.reveal_hand)
+
+    def update_info(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index]
+        if self.compact_player_panels:
+            if not self.carousel_locked or self.carousel_player_index == game.turn_index:
+                self.carousel_locked = False
+                self.carousel_player_index = game.turn_index
+                self.update_table_view()
+        banner_key = (game.round_num, game.turn_index)
+        if not player.is_ai and self.is_profile_player(player):
+            if self.turn_banner_key != banner_key:
+                self.show_turn_banner(player, banner_key)
+        else:
+            self.stop_turn_banner()
+        depth = getattr(self, "game_depth", 0)
+        depth_prefix = f"NG+{depth} " if depth > 0 else ""
+        self.info_label.config(
+            text=(
+                f"{depth_prefix}Round {game.round_num} - "
+                f"{player.name} ({'AI' if player.is_ai else 'Human'})"
+            )
+        )
+
+    def update_status(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index]
+        bag_counts = ", ".join([f"{c}:{player.bag.counts[c]}" for c in COLORS])
+        score_to_beat = None
+        if self.scores_this_round:
+            score_to_beat = max(result.total for _, result in self.scores_this_round)
+        score_text = f" | Score to beat: {int(score_to_beat)}" if score_to_beat is not None else " | Score to beat: --"
+        best_text = ""
+        if self.hand_revealed and not self.rolling_active and game.current_hand:
+            result = best_score(
+                game.current_hand,
+                player,
+                self.get_color_overrides(player),
+                self.get_value_wild_ids(game.current_hand, player),
+            )
+            best_text = f" | Best: {result.name} ({result.total})"
+        nimble = f" | Nimble dice: {player.turn_nimble_dice}" if player.turn_nimble_dice > 0 else ""
+        self.status_label.config(
+            text=(
+                f"Rerolls left: {game.rerolls_left} | Kibbles: {player.kibbles:.1f}{score_text} | "
+                f"Bag: {bag_counts}{best_text}{nimble}"
+            )
+        )
+        selected = len(self.get_selected_indices())
+        nimble_can_act = (
+            self.hand_revealed
+            and not self.in_shop
+            and not self.dice_bank_active
+            and not self.bag_view_active
+            and not self.cat_burglar_active
+            and not player.is_ai
+            and not getattr(player, "rerolls_blocked", False)
+        )
+        if self.nimble_selecting:
+            self.reroll_button.config(
+                text="Nimble Roll",
+                command=lambda: self.apply_nimble_reroll(from_inventory=True),
+                state="normal" if nimble_can_act and selected > 0 else "disabled",
+            )
+            self.nimble_button.config(state="normal")
+        elif self.devil_selecting:
+            self.reroll_button.config(
+                text="Devil Roll",
+                command=lambda: self.apply_devil_reroll(from_inventory=True),
+                state="normal" if nimble_can_act and selected > 0 else "disabled",
+            )
+            self.nimble_button.config(state="disabled")
+        else:
+            self.reroll_button.config(
+                text="Reroll Selected",
+                command=self.on_reroll,
+                state="disabled" if game.rerolls_left <= 0 or getattr(player, "rerolls_blocked", False) else "normal",
+            )
+            self.nimble_button.config(state="disabled")
+        can_act = (
+            self.hand_revealed
+            and not self.in_shop
+            and not self.dice_bank_active
+            and not self.bag_view_active
+            and not self.cat_burglar_active
+            and not player.is_ai
+        )
+        self.end_turn_button.config(state="normal" if can_act else "disabled")
+        self.sort_button.config(state="normal" if can_act else "disabled")
+        self.update_turn_action_visibility(player)
+        if (
+            self.hand_revealed
+            and not self.in_shop
+            and game.rerolls_left <= 0
+            and not self.auto_sorted_on_zero
+        ):
+            game.current_hand.sort(key=lambda d: d.value)
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+            self.render_hand()
+            self.auto_sorted_on_zero = True
+
+    def update_turn_action_visibility(self, player: Player) -> None:
+        if player.is_ai:
+            if self.reroll_button.winfo_ismapped():
+                self.reroll_button.pack_forget()
+            if self.end_turn_button.winfo_ismapped():
+                self.end_turn_button.pack_forget()
+            if self.bag_button.winfo_ismapped():
+                self.bag_button.pack_forget()
+            return
+        if not self.reroll_button.winfo_ismapped():
+            self.reroll_button.pack(side="left")
+        if not self.end_turn_button.winfo_ismapped():
+            self.end_turn_button.pack(side="left", padx=5)
+        if not self.bag_button.winfo_ismapped():
+            self.bag_button.pack(side="left", padx=5)
+        game = self.game
+
+    def stop_turn_banner(self) -> None:
+        if self.turn_banner_job:
+            self.root.after_cancel(self.turn_banner_job)
+            self.turn_banner_job = None
+        if self.turn_flash_job:
+            self.root.after_cancel(self.turn_flash_job)
+            self.turn_flash_job = None
+        self.turn_flash_on = False
+        self.turn_banner_key = None
+        if self.turn_banner_toast and self.turn_banner_toast.winfo_exists():
+            self.turn_banner_toast.destroy()
+        self.turn_banner_toast = None
+
+    def show_turn_banner(self, player: Player, banner_key: tuple) -> None:
+        self.stop_turn_banner()
+        self.turn_banner_key = banner_key
+        name = self.profile_data.get("name") if self.profile_data else player.name
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        label = tk.Label(
+            toast,
+            text=f"{name}'s turn!",
+            font=self.theme["header_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["accent"],
+        )
+        label.pack(anchor="center", padx=16, pady=10)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.turn_banner_toast = toast
+
+        def flash() -> None:
+            if not label.winfo_exists():
+                return
+            color = self.theme["accent"] if self.turn_flash_on else self.theme["text"]
+            label.config(fg=color)
+            self.turn_flash_on = not self.turn_flash_on
+            self.turn_flash_job = self.root.after(300, flash)
+
+        def finish() -> None:
+            if self.turn_flash_job:
+                self.root.after_cancel(self.turn_flash_job)
+                self.turn_flash_job = None
+            if toast.winfo_exists():
+                toast.destroy()
+            self.turn_banner_key = None
+            self.turn_banner_toast = None
+
+        self.turn_flash_on = True
+        flash()
+        self.turn_banner_job = self.root.after(4000, finish)
+
+    def get_scoring_indices(self, hand: list[Die], player: Player) -> set[int]:
+        if not hand or len(hand) < 5:
+            return set()
+        result = best_score(
+            hand,
+            player,
+            self.get_color_overrides(player),
+            self.get_value_wild_ids(hand, player),
+        )
+        base_dice = self.get_base_hand_dice(result, player)
+        indices = set()
+        used = set()
+        for die in base_dice:
+            for idx, candidate in enumerate(hand):
+                if idx in used:
+                    continue
+                if candidate is die:
+                    indices.add(idx)
+                    used.add(idx)
+                    break
+        return indices
+
+    def get_base_hand_dice(self, result, player: Player) -> list[Die]:
+        dice = list(result.dice or [])
+        if not dice:
+            return []
+        name = (result.name or "").lower()
+        if "no score" in name:
+            return []
+        objective_color = player.objective_color
+        value_overrides = getattr(result, "value_overrides", None) or {}
+
+        def die_value(die: Die) -> int:
+            if value_overrides and id(die) in value_overrides:
+                return value_overrides[id(die)]
+            return die.value
+
+        def objective_count(group: list[Die]) -> int:
+            if not objective_color:
+                return 0
+            return sum(
+                1
+                for die in group
+                if self.effective_die_color(die, player) in (objective_color, "purple")
+            )
+
+        def choose_group(groups: list[list[Die]]) -> list[Die]:
+            if not groups:
+                return dice
+            if not objective_color:
+                return groups[0]
+            return max(groups, key=objective_count)
+
+        if "straight" in name:
+            if "small straight" in name:
+                return self.select_small_straight_dice(
+                    dice,
+                    objective_color,
+                    player,
+                    value_overrides,
+                )
+            return dice
+        if "full house" in name:
+            return dice
+        groups: dict[int, list[Die]] = {}
+        for die in dice:
+            groups.setdefault(die_value(die), []).append(die)
+        if "five of a kind" in name:
+            candidates = [g for g in groups.values() if len(g) == 5]
+            return choose_group(candidates)
+        if "four of a kind" in name:
+            candidates = [g for g in groups.values() if len(g) == 4]
+            return choose_group(candidates)
+        if "three of a kind" in name:
+            candidates = [g for g in groups.values() if len(g) == 3]
+            return choose_group(candidates)
+        if name == "two pair":
+            pairs = [g for g in groups.values() if len(g) == 2]
+            if not pairs:
+                return dice
+            if len(pairs) > 2:
+                pairs = sorted(pairs, key=objective_count, reverse=True)[:2]
+            return [die for group in pairs for die in group]
+        if name == "pair":
+            candidates = [g for g in groups.values() if len(g) == 2]
+            return choose_group(candidates)
+        return dice
+
+    def select_small_straight_dice(
+        self,
+        dice: list[Die],
+        objective_color: str | None,
+        player: Player | None = None,
+        value_overrides: dict[int, int] | None = None,
+    ) -> list[Die]:
+        def die_value(die: Die) -> int:
+            if value_overrides and id(die) in value_overrides:
+                return value_overrides[id(die)]
+            return die.value
+
+        values = [die_value(d) for d in dice]
+        unique_vals = set(values)
+        best_start = None
+        for start in range(1, 4):
+            needed = set(range(start, start + 4))
+            if needed.issubset(unique_vals):
+                best_start = start
+        if best_start is None:
+            return dice
+        needed = set(range(best_start, best_start + 4))
+        selected: list[Die] = []
+        def choose_candidate(candidates: list[Die]) -> Die:
+            if objective_color:
+                for die in candidates:
+                    if self.effective_die_color(die, player) == objective_color:
+                        return die
+                for die in candidates:
+                    if self.effective_die_color(die, player) == "purple":
+                        return die
+            return candidates[0]
+        for value in range(best_start, best_start + 4):
+            candidates = [die for die in dice if die_value(die) == value]
+            if candidates:
+                selected.append(choose_candidate(candidates))
+        if len(selected) < 4:
+            for die in dice:
+                if die_value(die) in needed and die not in selected:
+                    selected.append(die)
+                    if len(selected) >= 4:
+                        break
+        return selected
+
+    def show_jumbling(self) -> None:
+        for widget in self.hand_frame.winfo_children():
+            widget.destroy()
+        self.dice_vars = []
+        self.dice_checks = []
+        self.dice_frames = []
+        self.scoring_highlight_indices = set()
+        self.reroll_set_aside = set()
+        self.reroll_set_aside_order = []
+        self.start_jumble_sound()
+        self.stop_bag_shake()
+        panel_dark = self.roll_color("panel_dark")
+        muted = self.roll_color("muted")
+        row = tk.Frame(self.hand_frame, bg=panel_dark)
+        row.pack(anchor="center", pady=(0, 4))
+        if self.bag_image:
+            holder = tk.Frame(row, width=self.bag_image.width(), height=self.bag_image.height(), bg=panel_dark)
+            holder.pack(side="left", padx=(0, 6))
+            holder.pack_propagate(False)
+            img_label = tk.Label(
+                holder,
+                image=self.bag_image,
+                bg=panel_dark,
+            )
+            img_label.place(x=0, y=0)
+            self.jumble_bag_label = img_label
+            self.jumble_bag_holder = holder
+            self.start_bag_shake()
+            self.roll_bag_origin = self.get_widget_center(holder, self.hand_frame)
+        label = tk.Label(
+            row,
+            text="Jumbling bag... . . .",
+            font=self.theme["body_font"],
+            bg=panel_dark,
+            fg=muted,
+        )
+        label.pack(side="left")
+        self.reroll_button.config(state="disabled")
+        self.end_turn_button.config(state="disabled")
+        self.bag_button.config(state="disabled")
+
+    def reveal_hand(self) -> None:
+        self.stop_jumble_sound()
+        self.stop_bag_shake()
+        if self.momma_pending:
+            self.apply_momma_cat(self.players[self.game.turn_index], uses=self.momma_pending)
+            self.momma_pending = 0
+        self.start_roll_animation(on_finish=self.finish_reveal_hand)
+
+    def start_bag_shake(self) -> None:
+        if not self.jumble_bag_label or not self.jumble_bag_holder:
+            return
+        self.jumble_shake_phase = 0
+
+        def step() -> None:
+            if not self.jumble_bag_label or not self.jumble_bag_holder:
+                return
+            if not self.jumble_bag_label.winfo_exists():
+                return
+            offsets = [-2, 2, -3, 3, 0]
+            offset = offsets[self.jumble_shake_phase % len(offsets)]
+            self.jumble_bag_label.place(x=offset, y=0)
+            self.jumble_shake_phase += 1
+            self.jumble_shake_job = self.root.after(80, step)
+
+        step()
+
+    def stop_bag_shake(self) -> None:
+        if self.jumble_shake_job:
+            try:
+                self.root.after_cancel(self.jumble_shake_job)
+            except tk.TclError:
+                pass
+            self.jumble_shake_job = None
+        if self.jumble_bag_label and self.jumble_bag_label.winfo_exists():
+            self.jumble_bag_label.place(x=0, y=0)
+        self.jumble_bag_label = None
+        self.jumble_bag_holder = None
+
+    def get_widget_center(
+        self, widget: tk.Widget | None, relative_to: tk.Widget | None
+    ) -> tuple[float, float] | None:
+        if not widget or not relative_to:
+            return None
+        try:
+            if not widget.winfo_exists() or not relative_to.winfo_exists():
+                return None
+            self.root.update_idletasks()
+            rx = relative_to.winfo_rootx()
+            ry = relative_to.winfo_rooty()
+            wx = widget.winfo_rootx()
+            wy = widget.winfo_rooty()
+            return (
+                wx - rx + widget.winfo_width() / 2,
+                wy - ry + widget.winfo_height() / 2,
+            )
+        except tk.TclError:
+            return None
+
+    def get_die_image_size(self) -> tuple[int, int]:
+        active_images = self.get_active_die_image_map()
+        for color in ("red", "blue", "green", "yellow", "purple"):
+            images = active_images.get(color)
+            if images:
+                img = next(iter(images.values()))
+                if img:
+                    return img.width(), img.height()
+        return (64, 64)
+
+    def get_roll_canvas_size(self, count: int) -> tuple[int, int]:
+        die_w, die_h = self.get_die_image_size()
+        spacing = max(6, int(die_w * 0.1))
+        row_width = count * die_w + max(0, count - 1) * spacing
+        self.root.update_idletasks()
+        frame_w = max(self.hand_frame.winfo_width(), row_width + 20, die_w + 20)
+        frame_h = max(self.hand_frame.winfo_height(), die_h + 20)
+        return int(frame_w), int(frame_h)
+
+    def resolve_roll_origin(self) -> tuple[float, float]:
+        origin = self.roll_bag_origin
+        if not origin and self.jumble_bag_holder:
+            origin = self.get_widget_center(self.jumble_bag_holder, self.hand_frame)
+        if not origin:
+            self.root.update_idletasks()
+            frame_w = max(self.hand_frame.winfo_width(), 1)
+            frame_h = max(self.hand_frame.winfo_height(), 1)
+            origin = (frame_w / 2, frame_h / 2)
+        return origin
+
+    def prepare_roll_animation_targets(self) -> None:
+        game = self.game
+        if not game:
+            return
+        count = len(game.current_hand)
+        if count <= 0:
+            return
+        die_w, die_h = self.get_die_image_size()
+        spacing = max(6, int(die_w * 0.1))
+        row_width = count * die_w + max(0, count - 1) * spacing
+        self.root.update_idletasks()
+        frame_w = max(self.hand_frame.winfo_width(), row_width + 20, die_w + 20)
+        frame_h = max(self.hand_frame.winfo_height(), die_h + 20)
+        self.roll_anim_canvas_size = (int(frame_w), int(frame_h))
+        start_x = (frame_w - row_width) / 2 + die_w / 2
+        center_y = frame_h / 2
+        targets: list[tuple[float, float]] = []
+        for idx in range(count):
+            jitter = self.rolling_all or idx in self.rolling_indices
+            jitter_x = random.randint(-8, 8) if jitter else 0
+            jitter_y = random.randint(-6, 6) if jitter else 0
+            x = start_x + idx * (die_w + spacing) + jitter_x
+            y = center_y + jitter_y
+            targets.append((x, y))
+        origin = self.roll_anim_origin or (frame_w / 2, center_y)
+        origin_x = min(max(origin[0], 0), frame_w)
+        origin_y = min(max(origin[1], 0), frame_h)
+        starts: list[tuple[float, float]] = []
+        for idx in range(count):
+            if self.rolling_all or idx in self.rolling_indices:
+                starts.append((origin_x, origin_y))
+            else:
+                starts.append(targets[idx])
+        self.roll_anim_targets = targets
+        self.roll_anim_starts = starts
+
+    def clear_roll_canvas(self) -> None:
+        if self.rolling_canvas and self.rolling_canvas.winfo_exists():
+            self.rolling_canvas.destroy()
+        self.rolling_canvas = None
+        self.rolling_items = []
+        self.rolling_images = []
+
+    def start_roll_animation(self, indices: list[int] | None = None, on_finish=None) -> None:
+        self.rolling_active = True
+        self.hand_revealed = False
+        self.safe_config(self.reroll_button, state="disabled")
+        self.safe_config(self.end_turn_button, state="disabled")
+        self.safe_config(self.bag_button, state="disabled")
+        self.safe_config(self.nimble_button, state="disabled")
+        if self.speed_var.get() and self.game and self.players[self.game.turn_index].is_ai:
+            self.rolling_active = False
+            if on_finish:
+                self.root.after(1, on_finish)
+            return
+        self.start_roll_sound()
+        self.rolling_all = indices is None
+        self.rolling_indices = set(indices or [])
+        self.roll_finish_callback = on_finish
+        self.roll_anim_start_time = time.monotonic()
+        self.roll_anim_origin = self.resolve_roll_origin()
+        self.prepare_roll_animation_targets()
+        self.rolling_end_time = self.roll_anim_start_time + self.roll_anim_duration
+        if self.rolling_job:
+            self.root.after_cancel(self.rolling_job)
+        self.roll_step()
+
+    def roll_step(self) -> None:
+        if not self.rolling_active:
+            return
+        if time.monotonic() >= self.rolling_end_time:
+            self.finish_roll_animation()
+            return
+        self.render_rolling_hand()
+        self.rolling_job = self.root.after(50, self.roll_step)
+
+    def render_rolling_hand(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index] if self.players else None
+        active_images = self.get_active_die_image_map()
+        gray_images = self.get_active_gray_die_image_map()
+        purple_wild_image = self.get_display_purple_wild_image()
+        if len(self.roll_anim_targets) != len(game.current_hand):
+            self.prepare_roll_animation_targets()
+        if (
+            not self.rolling_canvas
+            or not self.rolling_canvas.winfo_exists()
+            or len(self.rolling_items) != len(game.current_hand)
+        ):
+            for widget in self.hand_frame.winfo_children():
+                widget.destroy()
+            panel_dark = self.roll_color("panel_dark")
+            canvas_w, canvas_h = self.roll_anim_canvas_size or (0, 0)
+            if not canvas_w or not canvas_h:
+                canvas_w, canvas_h = self.get_roll_canvas_size(len(game.current_hand))
+            self.rolling_canvas = tk.Canvas(
+                self.hand_frame,
+                width=canvas_w,
+                height=canvas_h,
+                bg=panel_dark,
+                highlightthickness=0,
+            )
+            self.rolling_canvas.pack(anchor="center")
+            self.rolling_items = []
+            self.rolling_images = [None] * len(game.current_hand)
+            for _ in game.current_hand:
+                item = self.rolling_canvas.create_image(0, 0, anchor="center")
+                self.rolling_items.append(item)
+        elapsed = time.monotonic() - self.roll_anim_start_time
+        duration = max(0.001, self.roll_anim_duration)
+        t = min(1.0, max(0.0, elapsed / duration))
+        c1 = 1.70158
+        c3 = c1 + 1
+        bounce = 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
+        for idx, die in enumerate(game.current_hand):
+            is_rolling = self.rolling_all or idx in self.rolling_indices
+            value = random.randint(1, 6) if is_rolling else die.value
+            use_gray = is_rolling
+            if use_gray:
+                img = gray_images.get("red", {}).get(value)
+                if not img:
+                    base = active_images.get("red", {}).get(value)
+                    if base:
+                        img = self.make_grayscale_image(base)
+                        gray_images.setdefault("red", {})[value] = img
+            else:
+                if self.is_starlight_active(player) and die.color == "purple" and purple_wild_image:
+                    img = purple_wild_image
+                else:
+                    display_color = self.effective_die_color(die, player)
+                    img = active_images.get(display_color, {}).get(value) or self.dice_images.get(display_color, {}).get(value)
+            start_x, start_y = self.roll_anim_starts[idx]
+            target_x, target_y = self.roll_anim_targets[idx]
+            if is_rolling:
+                x = start_x + (target_x - start_x) * bounce
+                y = start_y + (target_y - start_y) * bounce
+            else:
+                x, y = target_x, target_y
+            self.rolling_canvas.coords(self.rolling_items[idx], x, y)
+            if img:
+                self.rolling_canvas.itemconfig(self.rolling_items[idx], image=img)
+                self.rolling_images[idx] = img
+
+    def finish_roll_animation(self) -> None:
+        self.rolling_active = False
+        if self.rolling_job:
+            self.root.after_cancel(self.rolling_job)
+            self.rolling_job = None
+        self.rolling_indices = set()
+        self.rolling_all = False
+        self.rolling_labels = []
+        self.rolling_row = None
+        self.roll_anim_targets = []
+        self.roll_anim_starts = []
+        self.roll_anim_canvas_size = None
+        self.clear_roll_canvas()
+        self.stop_roll_sound()
+        callback = self.roll_finish_callback
+        self.roll_finish_callback = None
+        if callback:
+            callback()
+
+    def finish_reveal_hand(self) -> None:
+        for btn in (self.reroll_button, self.end_turn_button, self.bag_button):
+            self.safe_config(btn, state="normal")
+        self.hand_revealed = True
+        self.reroll_set_aside = set()
+        self.reroll_set_aside_order = []
+        game = self.game
+        if game:
+            player = self.players[game.turn_index]
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+        self.render_hand()
+        self.update_status()
+        if not game:
+            return
+        if not player.is_ai:
+            self.update_profile_roll_achievements(player)
+        if player.is_ai:
+            self.run_ai_cat_cards(player)
+            self.root.after(500, self.run_ai_turn)
+
+    def finish_reroll_animation(self) -> None:
+        for btn in (self.reroll_button, self.end_turn_button, self.bag_button):
+            self.safe_config(btn, state="normal")
+        self.hand_revealed = True
+        self.reroll_set_aside = set()
+        self.reroll_set_aside_order = []
+        game = self.game
+        if game:
+            player = self.players[game.turn_index]
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+        self.render_hand()
+        self.update_status()
+
+    def update_table_view(self) -> None:
+        if not self.game:
+            return
+        self.dog_card_widgets = []
+        if self.compact_player_panels and hasattr(self, "log_panel_container"):
+            if self.scorecard_panel_visible:
+                self.refresh_scorecard_panel()
+            elif self.log_panel_visible:
+                self.refresh_log_panel()
+        scores = [p.total_score for p in self.players]
+        unique_scores = sorted(set(scores), reverse=True) if scores else [0.0]
+
+        def place_for(player: Player) -> str:
+            rank = unique_scores.index(player.total_score) + 1
+            if 10 < rank % 100 < 14:
+                suffix = "th"
+            else:
+                suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
+            return f"{rank}{suffix}"
+        active_player_idx = (
+            self.get_shop_player_index()
+            if self.in_shop
+            else (self.game.turn_index if self.game else None)
+        )
+        shop_allowed = {
+            "Stray Cat",
+            "Fish Bone Cat",
+            "Present Cat",
+            "Bat Cat",
+            "Tolerant Cat",
+            "Regal Cat",
+            "Cat Tackle",
+            "Raccoon Cat",
+            "Lion Cut Cat",
+        }
+        def render_player_panel(container: tk.Frame, player_idx: int, show_nav: bool) -> None:
+            player = self.players[player_idx]
+            for widget in container.winfo_children():
+                widget.destroy()
+            inner = tk.Frame(container, bg=self.theme["panel"])
+            inner.pack(expand=True)
+
+            if show_nav:
+                nav = tk.Frame(inner, bg=self.theme["panel"])
+                nav.pack(anchor="center", pady=(0, 4))
+                nav.grid_columnconfigure(1, weight=1)
+                left_img = self.ui_images.get("left")
+                left_btn = tk.Button(
+                    nav,
+                    text="" if left_img else "◀",
+                    image=left_img,
+                    command=lambda: self.cycle_player_panel(-1),
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["panel"],
+                    relief="flat",
+                    borderwidth=0,
+                    padx=6,
+                    pady=2,
+                )
+                if left_img:
+                    left_btn.image = left_img
+                left_btn.grid(row=0, column=0, padx=6)
+                lock_img = self.ui_images.get("lock")
+                lock_wrap = tk.Frame(
+                    nav,
+                    bg=self.theme["panel"],
+                    highlightthickness=2,
+                    highlightbackground=self.theme["accent"] if self.carousel_locked else self.theme["panel"],
+                )
+                lock_wrap.grid(row=0, column=1, padx=8)
+                lock_btn = tk.Button(
+                    lock_wrap,
+                    text="" if lock_img else "Lock",
+                    image=lock_img,
+                    command=self.toggle_carousel_lock,
+                    font=self.theme["small_font"],
+                    bg=self.theme["panel"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["panel"],
+                    relief="flat",
+                    borderwidth=0,
+                    padx=6,
+                    pady=2,
+                )
+                if lock_img:
+                    lock_btn.image = lock_img
+                lock_btn.pack()
+                right_img = self.ui_images.get("right")
+                right_btn = tk.Button(
+                    nav,
+                    text="" if right_img else "▶",
+                    image=right_img,
+                    command=lambda: self.cycle_player_panel(1),
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["panel"],
+                    relief="flat",
+                    borderwidth=0,
+                    padx=6,
+                    pady=2,
+                )
+                if right_img:
+                    right_btn.image = right_img
+                right_btn.grid(row=0, column=2, padx=6)
+
+            show_info = self.show_hand_info
+            action_row = tk.Frame(inner, bg=self.theme["panel"])
+            action_row.pack(anchor="center", fill="x", pady=(0, 2))
+            view_hands_img = self.ui_images.get("view_hands")
+            hide_hands_img = self.ui_images.get("hide_hands")
+            active_img = hide_hands_img if show_info and hide_hands_img else view_hands_img
+            view_btn = tk.Button(
+                action_row,
+                text="Hide Hands" if show_info and not active_img else ("View Hands" if not active_img else ""),
+                image=active_img,
+                command=lambda idx=player_idx: self.toggle_hand_info(idx),
+                font=self.theme["small_font"],
+                bg=self.theme["panel"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["panel"],
+                relief="flat",
+                borderwidth=0,
+                padx=6,
+                pady=2,
+            )
+            if active_img:
+                view_btn.image = active_img
+            view_btn.pack(anchor="center")
+
+            body = tk.Frame(inner, bg=self.theme["panel"])
+            body.pack(fill="both", expand=True)
+            body.grid_columnconfigure(0, weight=1)
+            body.grid_columnconfigure(1, weight=2)
+
+            if show_info:
+                info_card = tk.Frame(body, bg=self.theme["panel"], bd=1, relief="groove")
+                info_card.grid(row=0, column=0, sticky="nsew", padx=(6, 4), pady=4)
+                tk.Label(
+                    info_card,
+                    text="Hand Guide",
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel"],
+                    fg=self.theme["text"],
+                ).pack(anchor="center", pady=(4, 2))
+                guide_lines = [
+                    "Pair: 1",
+                    "Two Pair: 2",
+                    "Three of a Kind: 2",
+                    "Full House: 3",
+                    "Small Straight: 3",
+                    "Large Straight: 5",
+                    "Four of a Kind: 6",
+                    "Five of a Kind: 8",
+                    "All 5 Same Color: +1",
+                    "Objective Color: +1 per die",
+                ]
+                for line in guide_lines:
+                    tk.Label(
+                        info_card,
+                        text=line,
+                        font=self.theme["small_font"],
+                        bg=self.theme["panel"],
+                        fg=self.theme["muted"],
+                    ).pack(anchor="w", padx=8)
+
+            content = tk.Frame(body, bg=self.theme["panel"])
+            col = 1 if show_info else 0
+            content.grid(row=0, column=col, sticky="nsew", padx=4, pady=4)
+
+            header = tk.Frame(content, bg=self.theme["panel"])
+            header.pack(anchor="center", fill="x")
+            avatar_row = tk.Frame(header, bg=self.theme["panel"])
+            avatar_row.pack(anchor="center", pady=(0, 2))
+            avatar_key = None
+            if hasattr(self, "player_avatar_keys") and player_idx < len(self.player_avatar_keys):
+                avatar_key = self.player_avatar_keys[player_idx]
+            if player.is_ai:
+                avatar_key = "ai"
+            if not avatar_key:
+                avatar_key = "they" if self.is_they_name(player.name) else "he"
+            avatar_img = self.profile_icon_images.get(avatar_key)
+            if avatar_img:
+                avatar_label = tk.Label(avatar_row, image=avatar_img, bg=self.theme["panel"])
+                avatar_label.image = avatar_img
+                avatar_label.pack(side="left", padx=(0, 6))
+            name_label = tk.Label(
+                avatar_row,
+                text=(
+                    f"{player.name} ({'AI' if player.is_ai else 'Human'})\n"
+                    f"Score: {player.total_score:.1f}\n"
+                    f"Place: {place_for(player)}"
+                ),
+                justify="center",
+                anchor="center",
+                font=self.theme["body_font"],
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+            )
+            name_label.pack(anchor="center")
+            kibble_row = tk.Frame(header, bg=self.theme["panel"])
+            kibble_row.pack(anchor="center", pady=(2, 0))
+            kibble_img = self.get_kibble_image(player.kibbles)
+            if kibble_img:
+                lbl = tk.Label(kibble_row, image=kibble_img, bg=self.theme["panel"])
+                lbl.image = kibble_img
+                lbl.pack(side="left", padx=(0, 4))
+            tk.Label(
+                kibble_row,
+                text=f"{int(player.kibbles)} kibbles",
+                font=self.theme["body_font"],
+                bg=self.theme["panel"],
+                fg=self.theme["text"],
+            ).pack(side="left")
+            if (
+                self.raccoon_active
+                and self.raccoon_player is not None
+                and player is not self.raccoon_player
+                and player.kibbles >= 1
+            ):
+                for widget in (name_label, kibble_row, header):
+                    widget.config(cursor="hand2")
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, p=player: self.confirm_raccoon_target(p),
+                    )
+            elif self.greedy_active and self.greedy_player is not None and player is not self.greedy_player:
+                for widget in (name_label, kibble_row, header):
+                    widget.config(cursor="hand2")
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, p=player: self.confirm_greedy_target(p),
+                    )
+            elif self.squirrel_active and self.squirrel_player is not None and player is not self.squirrel_player:
+                for widget in (name_label, kibble_row, header):
+                    widget.config(cursor="hand2")
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, p=player: self.confirm_squirrel_target(p),
+                    )
+            elif self.pummeling_active and self.pummeling_player is not None and player is not self.pummeling_player:
+                for widget in (name_label, kibble_row, header):
+                    widget.config(cursor="hand2")
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, p=player: self.confirm_pummeling_target(p),
+                    )
+            objective_text = (
+                f"Objective: {player.objective_color.title() if player.objective_color else 'None'} "
+                "(+1 per scoring die)"
+            )
+            tk.Label(
+                header,
+                text=objective_text,
+                justify="center",
+                anchor="center",
+                font=self.theme["body_font"],
+                bg=self.theme["panel"],
+                fg=self.objective_color_to_hex(player.objective_color),
+            ).pack(anchor="center")
+
+            def render_card_widget(parent: tk.Frame, card: Card) -> tuple[tk.Frame, tk.Label, tk.Label | None]:
+                    is_cat = card.kind == "cat"
+                    is_dog = card.kind == "dog"
+                    img = self.get_card_image(card)
+                    highlight = (
+                        is_cat
+                        and self.in_shop
+                        and not player.is_ai
+                        and player_idx == active_player_idx
+                        and card.name in shop_allowed
+                    )
+                    blocked = (
+                        is_dog
+                        and player.blocked_dog_active
+                        and player.blocked_dog_card is card
+                    )
+                    highlight_color = self.objective_color_to_hex(player.objective_color)
+                    wrapper = tk.Frame(
+                        parent,
+                        bg=self.theme["panel"],
+                        highlightthickness=2 if highlight else 0,
+                        highlightbackground=highlight_color if highlight else self.theme["panel"],
+                    )
+                    if (
+                        is_dog
+                        and self.dogs_best_friend_active
+                        and self.dogs_best_friend_player is not None
+                        and player is self.dogs_best_friend_player
+                    ):
+                        wrapper.config(
+                            highlightthickness=2,
+                            highlightbackground=self.theme["accent"],
+                        )
+                    if img:
+                        lbl = tk.Label(wrapper, image=img, bg=self.theme["panel"])
+                        lbl.image = img
+                    else:
+                        lbl = tk.Label(
+                            wrapper,
+                            text=card.name,
+                            font=self.theme["body_font"],
+                            bg=self.theme["panel"],
+                            fg=self.theme["text"],
+                        )
+                    lbl.pack()
+                    wrapper.card_ref = card
+                    wrapper.card_owner = player
+                    wrapper.card_name = card.name
+                    wrapper.is_card_widget = True
+                    lbl.card_ref = card
+                    lbl.card_owner = player
+                    lbl.card_name = card.name
+                    lbl.is_card_widget = True
+                    if is_dog:
+                        self.dog_card_widgets.append((wrapper, card, player))
+                        self.dog_card_widgets.append((lbl, card, player))
+                    blocked_label = None
+                    if blocked:
+                        blocked_label = tk.Label(
+                            wrapper,
+                            text="BLOCKED",
+                            font=self.theme["small_font"],
+                            bg=self.theme["panel"],
+                            fg=self.theme["muted"],
+                        )
+                        blocked_label.pack()
+                        blocked_label.card_ref = card
+                        blocked_label.card_owner = player
+                        blocked_label.card_name = card.name
+                        blocked_label.is_card_widget = True
+                    if is_dog:
+                        def on_dogs_best_friend_click(_e, c=card, p=player):
+                            if (
+                                self.dogs_best_friend_active
+                                and self.dogs_best_friend_player is not None
+                            ):
+                                if self.confirm_dogs_best_friend_from_inventory(p, c):
+                                    return "break"
+                                return None
+                            return None
+                        for widget in (wrapper, lbl):
+                            widget.bind("<Button-1>", on_dogs_best_friend_click, add="+")
+                        if blocked_label:
+                            blocked_label.bind("<Button-1>", on_dogs_best_friend_click, add="+")
+                    if (
+                        is_cat
+                        and self.pending_cat_purchase
+                        and self.pending_cat_purchase["player"] is player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card: self.confirm_dismiss_cat_from_inventory(c),
+                            )
+                    elif (
+                        is_dog
+                        and self.pending_dog_purchase
+                        and self.pending_dog_purchase["player"] is player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card: self.confirm_dismiss_dog_from_inventory(c),
+                            )
+                    for widget in (wrapper, lbl):
+                        self.attach_card_tooltip(widget, card)
+                    if blocked_label:
+                        self.attach_card_tooltip(blocked_label, card)
+                    if (
+                        is_cat
+                        and self.void_cat_active
+                        and self.void_cat_player is not None
+                        and player is not self.void_cat_player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(
+                            highlightthickness=2,
+                            highlightbackground="#cc4b4b",
+                        )
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_void_cat_from_inventory(p, c),
+                            )
+                    if (
+                        is_cat
+                        and self.thief_night_active
+                        and self.thief_night_player is not None
+                        and player is not self.thief_night_player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(
+                            highlightthickness=2,
+                            highlightbackground="#cc4b4b",
+                        )
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_thief_night_from_inventory(p, c),
+                            )
+                    if (
+                        is_dog
+                        and self.lioncut_active
+                        and self.lioncut_player is not None
+                        and player is self.lioncut_player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(
+                            highlightthickness=2,
+                            highlightbackground=self.theme["accent"],
+                        )
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_lioncut_from_inventory(p, c),
+                            )
+                    if is_cat and not player.is_ai and player_idx == active_player_idx:
+                        if (
+                            self.in_shop
+                            and self.pending_cat_purchase
+                            and self.pending_cat_purchase["player"] is player
+                        ):
+                            pass
+                        elif self.in_shop:
+                            for widget in (wrapper, lbl):
+                                widget.config(cursor="hand2")
+                                widget.bind(
+                                    "<Button-3>",
+                                    lambda _e, c=card, p=player: self.confirm_sell_cat(p, c),
+                                )
+                                widget.bind(
+                                    "<Shift-Button-1>",
+                                    lambda _e, c=card, p=player: self.confirm_sell_cat(p, c),
+                                )
+                            if card.name not in shop_allowed:
+                                for widget in (wrapper, lbl):
+                                    widget.bind(
+                                        "<Button-1>",
+                                        lambda _e, c=card, p=player: self.confirm_sell_cat(p, c),
+                                    )
+                            else:
+                                for widget in (wrapper, lbl):
+                                    widget.bind("<Button-1>", lambda _e, c=card: self.use_cat_card(c))
+                        else:
+                            for widget in (wrapper, lbl):
+                                widget.config(cursor="hand2")
+                                widget.bind("<Button-1>", lambda _e, c=card: self.use_cat_card(c))
+                    if (
+                        is_dog
+                        and self.territorial_active
+                        and not self.in_shop
+                        and player is not self.territorial_player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_territorial_from_inventory(p, c),
+                            )
+                    elif (
+                        is_dog
+                        and self.cat_burglar_active
+                        and not self.in_shop
+                        and player is not self.cat_burglar_player
+                        and player.is_ai
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(highlightbackground="#cc4b4b")
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_cat_burglar_from_inventory(p, c),
+                            )
+                    elif (
+                        is_dog
+                        and self.thief_night_active
+                        and not self.in_shop
+                        and player is not self.thief_night_player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(highlightbackground="#cc4b4b")
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_thief_night_from_inventory(p, c),
+                            )
+                    elif (
+                        is_dog
+                        and self.dogs_best_friend_active
+                        and self.dogs_best_friend_player is player
+                    ):
+                        for widget in (wrapper, lbl):
+                            widget.config(cursor="hand2")
+                        wrapper.config(
+                            highlightthickness=2,
+                            highlightbackground=self.theme["accent"],
+                        )
+                        for widget in (wrapper, lbl):
+                            widget.bind(
+                                "<Button-1>",
+                                lambda _e, c=card, p=player: self.confirm_dogs_best_friend_from_inventory(p, c),
+                            )
+                    elif is_dog and self.in_shop and not player.is_ai and player_idx == active_player_idx:
+                        if (
+                            self.pending_dog_purchase
+                            and self.pending_dog_purchase["player"] is player
+                        ):
+                            pass
+                        else:
+                            for widget in (wrapper, lbl):
+                                widget.config(cursor="hand2")
+                                widget.bind(
+                                    "<Button-1>",
+                                    lambda _e, c=card, p=player: self.confirm_sell_dog(p, c),
+                                )
+                    return wrapper, lbl, blocked_label
+
+            def render_card_group(parent: tk.Frame, title: str, cards: list[Card], group_duplicates: bool = True) -> None:
+                group = tk.Frame(parent, bg=self.theme["panel"])
+                group.pack(side="left", padx=10)
+                if title:
+                    tk.Label(
+                        group,
+                        text=title,
+                        anchor="center",
+                        font=self.theme["body_font"],
+                        bg=self.theme["panel"],
+                        fg=self.theme["muted"],
+                    ).pack(anchor="center")
+                cards_frame = tk.Frame(group, bg=self.theme["panel"])
+                cards_frame.pack(anchor="center", pady=(2, 0))
+                if not cards:
+                    tk.Label(
+                        cards_frame,
+                        text="None",
+                        font=self.theme["body_font"],
+                        bg=self.theme["panel"],
+                        fg=self.theme["muted"],
+                    ).pack(side="left")
+                    return
+                if not group_duplicates:
+                    for card in cards:
+                        wrapper, _lbl, _blocked = render_card_widget(cards_frame, card)
+                        wrapper.pack(side="left", padx=2)
+                    return
+                grouped: dict[str, list[Card]] = {}
+                order: list[str] = []
+                for card in cards:
+                    if card.name not in grouped:
+                        grouped[card.name] = []
+                        order.append(card.name)
+                    grouped[card.name].append(card)
+
+                for name in order:
+                    group = grouped[name]
+                    if len(group) == 1:
+                        wrapper, _lbl, _blocked = render_card_widget(cards_frame, group[0])
+                        wrapper.pack(side="left", padx=2)
+                        continue
+                    first_img = self.get_card_image(group[0])
+                    if not first_img:
+                        for card in group:
+                            wrapper, _lbl, _blocked = render_card_widget(cards_frame, card)
+                            wrapper.pack(side="left", padx=2)
+                        continue
+                    card_w = first_img.width()
+                    card_h = first_img.height()
+                    offset = max(6, card_w // 4)
+                    stack = tk.Frame(
+                        cards_frame,
+                        bg=self.theme["panel"],
+                        width=card_w + offset * (len(group) - 1),
+                        height=card_h,
+                    )
+                    stack.pack(side="left", padx=2)
+                    stack.pack_propagate(False)
+                    for idx, card in enumerate(group):
+                        wrapper, _lbl, _blocked = render_card_widget(stack, card)
+                        wrapper.place(x=offset * idx, y=0, width=card_w, height=card_h)
+
+            cards_row = tk.Frame(content, bg=self.theme["panel"])
+            cards_row.pack(anchor="center", pady=2)
+            dog_cards = player.dog_cards + player.temp_dog_cards
+            groups = [
+                ("", player.cat_cards, True),
+                ("", dog_cards, True),
+                ("", player.stolen_dog_cards, False),
+            ]
+            rendered = 0
+            for title, cards, group_duplicates in groups:
+                render_card_group(cards_row, title, cards, group_duplicates=group_duplicates)
+                rendered += 1
+                if rendered < len(groups):
+                    tk.Frame(cards_row, bg=self.theme["panel"], width=8).pack(side="left")
+
+        if self.compact_player_panels:
+            if self.carousel_player_index >= len(self.players):
+                self.carousel_player_index = 0
+            render_player_panel(self.player_panel_carousel, self.carousel_player_index, True)
+            self.player_panel_main.pack_forget()
+            return
+
+        positions = [0, 1, 2, 3]
+        for idx, player_idx in enumerate(positions):
+            render_player_panel(self.table_labels[idx], player_idx, False)
+
+    def cycle_player_panel(self, direction: int) -> None:
+        if not self.players:
+            return
+        indices = list(range(len(self.players)))
+        if self.carousel_player_index not in indices:
+            self.carousel_player_index = indices[0]
+        else:
+            current_idx = indices.index(self.carousel_player_index)
+            self.carousel_player_index = indices[(current_idx + direction) % len(indices)]
+        if self.game and self.carousel_player_index != self.game.turn_index:
+            self.carousel_locked = True
+        elif self.game and self.carousel_player_index == self.game.turn_index:
+            self.carousel_locked = False
+        self.update_table_view()
+
+    def toggle_carousel_lock(self) -> None:
+        self.carousel_locked = not self.carousel_locked
+        if not self.carousel_locked and self.game:
+            self.carousel_player_index = self.game.turn_index
+        self.update_table_view()
+
+    def focus_human_player_panel(self) -> None:
+        if not self.players:
+            return
+        target_idx = None
+        for idx, player in enumerate(self.players):
+            if self.is_profile_player(player):
+                target_idx = idx
+                break
+        if target_idx is None:
+            for idx, player in enumerate(self.players):
+                if not player.is_ai:
+                    target_idx = idx
+                    break
+        if target_idx is None:
+            target_idx = 0
+        self.carousel_locked = False
+        self.carousel_player_index = target_idx
+        self.update_table_view()
+
+    def render_cat_actions(self) -> None:
+        game = self.game
+        if not game:
+            return
+        for widget in self.cat_buttons_frame.winfo_children():
+            widget.destroy()
+        if self.in_shop:
+            player_idx = self.get_shop_player_index()
+            if player_idx is None:
+                return
+            player = self.players[player_idx]
+        else:
+            player = self.players[game.turn_index]
+        if self.in_shop:
+            allowed = [
+                c
+                for c in player.cat_cards
+                if c.name
+                in (
+                    "Stray Cat",
+                    "Fish Bone Cat",
+                    "Present Cat",
+                    "Bat Cat",
+                    "Tolerant Cat",
+                    "Regal Cat",
+                    "Cat Tackle",
+                    "Raccoon Cat",
+                    "Lion Cut Cat",
+                )
+            ]
+            text = (
+                "Click cat cards in your player panel to use them."
+                if allowed
+                else "No usable cat cards in shop"
+            )
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text=text,
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if player.is_ai:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="AI player",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.cat_burglar_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Cat Burglar active: click an AI dog card to steal it.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.dogs_best_friend_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Dogs Best Friend active: click a dog card to copy for this round.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            dog_row = tk.Frame(self.cat_buttons_frame, bg=panel_dark)
+            dog_row.pack(anchor="center", pady=(4, 0))
+            dogs = player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards
+            if not dogs:
+                tk.Label(
+                    dog_row,
+                    text="No dog cards to copy.",
+                    font=self.theme["body_font"],
+                    bg=panel_dark,
+                    fg=muted,
+                ).pack()
+            else:
+                for dog in dogs:
+                    img = self.get_card_image(dog)
+                    if img:
+                        btn = tk.Button(
+                            dog_row,
+                            image=img,
+                            command=lambda c=dog: self.confirm_dogs_best_friend_from_inventory(player, c),
+                            bg=panel_dark,
+                            activebackground=panel_dark,
+                            relief="flat",
+                            borderwidth=0,
+                        )
+                        btn.image = img
+                    else:
+                        btn = tk.Button(
+                            dog_row,
+                            text=dog.name,
+                            command=lambda c=dog: self.confirm_dogs_best_friend_from_inventory(player, c),
+                            font=self.theme["body_font"],
+                            bg=self.theme["btn"],
+                            fg=self.theme["btn_text"],
+                            activebackground=self.theme["btn_active"],
+                            relief="flat",
+                            padx=6,
+                            pady=4,
+                        )
+                    btn.pack(side="left", padx=2)
+                    btn.card_ref = dog
+                    btn.card_owner = player
+                    btn.card_name = dog.name
+                    btn.is_card_widget = True
+                    self.attach_card_tooltip(btn, dog)
+            return
+        if self.void_cat_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Void Cat active: click an opponent cat card to steal it.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.lioncut_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Lion Cut Cat active: click one of your dog cards to move it to stolen.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.pummeling_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Pummeling Puma active: click a player name to block rerolls next round.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.greedy_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Greedy Cat active: click a player name to target.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.squirrel_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Squirrel Cat active: click a player name to add 4 random dice.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.thief_night_active:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Thief in the Night active: click any opponent card to steal.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if self.focus_selecting:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="Focus Cat active: click a die to focus.",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        if not player.cat_cards:
+            panel_dark = self.roll_color("panel_dark")
+            muted = self.roll_color("muted")
+            tk.Label(
+                self.cat_buttons_frame,
+                text="None",
+                font=self.theme["body_font"],
+                bg=panel_dark,
+                fg=muted,
+            ).pack(anchor="center")
+            return
+        panel_dark = self.roll_color("panel_dark")
+        muted = self.roll_color("muted")
+        tk.Label(
+            self.cat_buttons_frame,
+            text="Click cat cards in your player panel to use them.",
+            font=self.theme["body_font"],
+            bg=panel_dark,
+            fg=muted,
+        ).pack(anchor="center")
+
+    def render_hand(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index] if self.players else None
+        if self.hand_revealed and player:
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+        elif not self.hand_revealed:
+            self.scoring_highlight_indices = set()
+        prev_selected = set()
+        if self.dice_vars:
+            for i, var in enumerate(self.dice_vars):
+                try:
+                    if var.get():
+                        prev_selected.add(i)
+                except tk.TclError:
+                    pass
+        if (
+            self.hand_revealed
+            and game.rerolls_left <= 0
+            and not self.nimble_selecting
+            and not self.devil_selecting
+        ):
+            prev_selected = set()
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+        if player and player.focus_overrides:
+            valid_ids = {id(d) for d in game.current_hand}
+            stale = [k for k in player.focus_overrides.keys() if k not in valid_ids]
+            if stale:
+                for k in stale:
+                    player.focus_overrides.pop(k, None)
+        for widget in self.hand_frame.winfo_children():
+            widget.destroy()
+        self.dice_vars = []
+        self.dice_checks = []
+        self.dice_frames = []
+        panel_dark = self.roll_color("panel_dark")
+        active_images = self.get_active_die_image_map()
+        purple_wild_image = self.get_display_purple_wild_image()
+        die_w, die_h = self.get_die_image_size()
+        die_padx = 1 if die_w <= 32 else 2
+        show_drop_area = (
+            self.hand_revealed
+            and not self.in_shop
+            and player
+            and not player.is_ai
+            and (game.rerolls_left > 0 or self.nimble_selecting or self.devil_selecting)
+        )
+        if show_drop_area:
+            selected_indices = prev_selected | self.reroll_set_aside
+        else:
+            selected_indices = prev_selected
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+        if show_drop_area:
+            wrapper = tk.Frame(self.hand_frame, bg=panel_dark)
+            wrapper.pack(anchor="center")
+            waste_img = self.ui_images.get("waste")
+            if waste_img:
+                drop_w = waste_img.width() + 12
+                drop_h = waste_img.height() + 12
+            else:
+                drop_w = max(int(die_w * 2.2), die_w + 20)
+                drop_h = max(int(die_h * 1.3), die_h + 20)
+            drop = tk.Frame(
+                wrapper,
+                width=drop_w,
+                height=drop_h,
+                bg=panel_dark,
+                highlightthickness=0,
+            )
+            drop.pack(side="left", padx=(0, 12))
+            drop.pack_propagate(False)
+            if waste_img:
+                label = tk.Label(drop, image=waste_img, bg=panel_dark, bd=0)
+                label.place(relx=0.5, rely=0.5, anchor="center")
+                label._waste_img = waste_img
+                self.reroll_drop_canvas = None
+                self.reroll_drop_items = []
+            else:
+                tk.Label(
+                    drop,
+                    text="Remove\n& Reroll",
+                    font=self.theme["small_font"],
+                    bg=panel_dark,
+                    fg=self.roll_color("text"),
+                    justify="center",
+                ).pack(expand=True)
+            self.reroll_drop_frame = drop
+            row = tk.Frame(wrapper, bg=panel_dark)
+            row.pack(side="left")
+        else:
+            self.reroll_drop_frame = None
+            self.reroll_drop_canvas = None
+            self.reroll_drop_items = []
+            row = tk.Frame(self.hand_frame, bg=panel_dark)
+            row.pack(anchor="center")
+        starlight_active = self.is_starlight_active(player)
+        for i, die in enumerate(game.current_hand):
+            display_color = self.effective_die_color(die, player)
+            var = tk.BooleanVar(value=(i in selected_indices))
+            self.dice_vars.append(var)
+            frame = tk.Frame(
+                row,
+                highlightthickness=2,
+                highlightbackground=panel_dark,
+                bg=panel_dark,
+            )
+            is_set_aside = show_drop_area and i in self.reroll_set_aside
+            if not is_set_aside:
+                frame.pack(side="left", padx=die_padx)
+            self.dice_frames.append(frame)
+            if is_set_aside:
+                cb = tk.Checkbutton(
+                    frame,
+                    text="",
+                    variable=var,
+                    width=die_w,
+                    height=die_h,
+                    indicatoron=0,
+                    bg=panel_dark,
+                    activebackground=panel_dark,
+                    disabledforeground=panel_dark,
+                    borderwidth=0,
+                )
+                cb.configure(selectcolor=panel_dark)
+            elif starlight_active and die.color == "purple" and purple_wild_image:
+                cb = tk.Checkbutton(
+                    frame,
+                    image=purple_wild_image,
+                    variable=var,
+                    width=die_w,
+                    height=die_h,
+                    indicatoron=0,
+                    bg=panel_dark,
+                    activebackground=panel_dark,
+                    borderwidth=0,
+                )
+                cb.configure(selectcolor=panel_dark)
+            elif (
+                display_color in active_images
+                and die.value in active_images[display_color]
+            ):
+                cb = tk.Checkbutton(
+                    frame,
+                    image=active_images[display_color][die.value],
+                    variable=var,
+                    width=die_w,
+                    height=die_h,
+                    indicatoron=0,
+                    bg=panel_dark,
+                    activebackground=panel_dark,
+                    borderwidth=0,
+                )
+                cb.configure(selectcolor=panel_dark)
+            else:
+                text = f"{display_color} {die.value}"
+                cb = tk.Checkbutton(
+                    frame,
+                    text=text,
+                    variable=var,
+                    bg=display_color,
+                    fg="black",
+                    width=12,
+                    indicatoron=0,
+                    activebackground=panel_dark,
+                )
+                cb.configure(selectcolor=panel_dark)
+            cb.bind("<ButtonPress-1>", self.on_drag_start)
+            cb.bind("<B1-Motion>", self.on_drag_motion)
+            cb.bind("<ButtonRelease-1>", self.on_drag_drop)
+            if not is_set_aside:
+                cb.pack()
+            self.dice_checks.append(cb)
+            if self.hand_revealed and i in self.scoring_highlight_indices:
+                underline = tk.Frame(frame, height=3, bg=self.theme["score_highlight"])
+                underline.pack(fill="x", pady=(2, 0))
+            var.trace_add("write", lambda *_args, idx=i: self.update_die_border(idx))
+            self.update_die_border(i)
+        if show_drop_area:
+            self.update_reroll_drop_display()
+
+    def on_reroll(self) -> None:
+        game = self.game
+        if not game:
+            return
+        if self.in_shop:
+            player_idx = self.get_shop_player_index()
+            if player_idx is None:
+                return
+            player = self.players[player_idx]
+        else:
+            player = self.players[game.turn_index]
+        if player.is_ai:
+            return
+        if getattr(player, "rerolls_blocked", False):
+            self.add_log(f"{player.name}'s rerolls are blocked this round.")
+            self.show_toast("Rerolls blocked this round!")
+            return
+        if game.rerolls_left <= 0:
+            self.add_log("No rerolls left.")
+            return
+        indices = self.get_selected_indices()
+        if not indices:
+            self.add_log("Select dice to reroll.")
+            return
+        if player.bag.total() <= 0 and player.turn_nimble_dice <= 0:
+            self.add_log("No dice left in the bag.")
+            self.show_toast("Bag Empty")
+            return
+        self.score_confirm_pending = False
+        rerolled_positions = game.reroll(player, indices)
+        self.start_roll_animation(indices=rerolled_positions, on_finish=self.finish_reroll_animation)
+
+    def on_end_turn(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index]
+        if not player.is_ai and game.rerolls_left > 0:
+            if not self.score_confirm_pending:
+                self.score_confirm_pending = True
+                self.show_score_toast(
+                    f"You still have {game.rerolls_left} rerolls. Click Score again to end turn.",
+                    duration_ms=2000,
+                    highlight=True,
+                    dismiss_on_click=True,
+                )
+                return
+        self.score_confirm_pending = False
+        if self.nimble_selecting and self.nimble_pending_card:
+            self.nimble_selecting = False
+            self.nimble_pending_card = None
+        if self.devil_selecting and self.devil_pending_card:
+            self.devil_selecting = False
+            self.devil_pending_card = None
+        if self.focus_selecting:
+            self.cancel_focus_selection()
+        if self.territorial_active and self.territorial_player is player:
+            self.territorial_active = False
+        if self.dogs_best_friend_active and self.dogs_best_friend_player is player:
+            self.cancel_dogs_best_friend()
+        if self.raccoon_active and self.raccoon_player is player:
+            self.cancel_raccoon()
+        if self.greedy_active and self.greedy_player is player:
+            self.cancel_greedy_selection()
+        if self.pummeling_active and self.pummeling_player is player:
+            self.cancel_pummeling_selection()
+        if self.void_cat_active and self.void_cat_player is player:
+            self.cancel_void_cat()
+        if self.lioncut_active and self.lioncut_player is player:
+            self.cancel_lioncut()
+        if self.thief_night_active and self.thief_night_player is player:
+            self.cancel_thief_night()
+        if self.schrodinger_pending is player:
+            self.apply_schrodinger_at_scoring(player)
+            return
+        self._complete_scoring(player)
+
+    def use_cat_card(self, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        if (
+            not self.in_shop
+            and self.rolling_active
+            and card.name not in ("Dogs Best Friend",)
+        ):
+            self.add_log("Wait for the roll to finish before using a cat card.")
+            return
+        if self.in_shop:
+            player_idx = self.get_shop_player_index()
+            if player_idx is None:
+                return
+            player = self.players[player_idx]
+        else:
+            player = self.players[game.turn_index]
+        if player.is_ai:
+            return
+        if not self.in_shop and self.players[game.turn_index] is not player:
+            self.add_log("You can only use cat cards on your turn.")
+            return
+        if self.in_shop and card.name not in (
+            "Stray Cat",
+            "Fish Bone Cat",
+            "Present Cat",
+            "Bat Cat",
+            "Tolerant Cat",
+            "Regal Cat",
+            "Cat Tackle",
+            "Raccoon Cat",
+            "Lion Cut Cat",
+        ):
+            self.add_log("Cat cards cannot be used during the shop.")
+            return
+        if card not in player.cat_cards:
+            self.add_log("That cat card is no longer available.")
+            if self.in_shop:
+                self.show_shop()
+            return
+        if (
+            self.greedy_active
+            and self.greedy_player is player
+            and card.name != "Greedy Cat"
+        ):
+            self.add_log("Finish Greedy Cat selection first.")
+            return
+        if (
+            self.pummeling_active
+            and self.pummeling_player is player
+            and card.name != "Pummeling Puma"
+        ):
+            self.add_log("Finish Pummeling Puma selection first.")
+            return
+        if (
+            self.squirrel_active
+            and self.squirrel_player is player
+            and card.name != "Squirrel Cat"
+        ):
+            self.add_log("Finish Squirrel Cat selection first.")
+            return
+        if self.schrodinger_pending and card.name != "Shrodinger's Cat":
+            self.add_log("Finish Shrodinger's Cat scoring first.")
+            return
+        if self.thief_night_active and self.thief_night_player is player and card.name != "Thief in the Night":
+            self.add_log("Finish Thief in the Night selection first.")
+            return
+        if (
+            self.void_cat_active
+            and self.void_cat_player is player
+            and card.name != "Void Cat"
+        ):
+            self.add_log("Finish Void Cat selection first.")
+            return
+        if (
+            self.lioncut_active
+            and self.lioncut_player is player
+            and card.name != "Lion Cut Cat"
+        ):
+            self.add_log("Finish Lion Cut Cat selection first.")
+            return
+        if card.name == "Nimble Cat":
+            if getattr(player, "rerolls_blocked", False):
+                self.add_log(f"{player.name}'s rerolls are blocked this round.")
+                self.show_toast("Rerolls blocked this round!")
+                return
+            if self.nimble_selecting:
+                if self.nimble_pending_card is card:
+                    indices = self.get_selected_indices()
+                    if not indices:
+                        self.nimble_selecting = False
+                        self.nimble_pending_card = None
+                        self.reroll_set_aside = set()
+                        self.reroll_set_aside_order = []
+                        self.show_nimble_toast("Nimble Roll Exited")
+                        self.update_table_view()
+                        self.render_hand()
+                        self.render_cat_actions()
+                        self.update_status()
+                        return
+                    self.apply_nimble_reroll(from_inventory=True)
+                else:
+                    self.add_log("Finish Nimble Cat selection first.")
+                return
+            if self.devil_selecting:
+                self.add_log("Finish Devil Cat selection first.")
+                return
+            self.nimble_selecting = True
+            self.nimble_pending_card = card
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+            for var in self.dice_vars:
+                try:
+                    var.set(False)
+                except tk.TclError:
+                    pass
+            self.add_log("Select up to 2 dice, then click Nimble Cat again to reroll.")
+            self.show_nimble_toast("Nimble Roll Active")
+            self.update_table_view()
+            self.render_hand()
+            self.render_cat_actions()
+            self.update_status()
+            return
+        if card.name == "Devil Cat":
+            if getattr(player, "rerolls_blocked", False):
+                self.add_log(f"{player.name}'s rerolls are blocked this round.")
+                self.show_toast("Rerolls blocked this round!")
+                return
+            if not self.hand_revealed or not game.current_hand:
+                self.add_log("Devil Cat can only be used after your hand is revealed.")
+                return
+            if self.devil_selecting:
+                if self.devil_pending_card is card:
+                    indices = self.get_selected_indices()
+                    if not indices:
+                        self.devil_selecting = False
+                        self.devil_pending_card = None
+                        self.reroll_set_aside = set()
+                        self.reroll_set_aside_order = []
+                        self.show_devil_toast("Devil Cat cancelled.")
+                        self.update_table_view()
+                        self.render_hand()
+                        self.render_cat_actions()
+                        self.update_status()
+                        return
+                    self.apply_devil_reroll(from_inventory=True)
+                else:
+                    self.add_log("Finish Devil Cat selection first.")
+                return
+            if self.nimble_selecting:
+                self.add_log("Finish Nimble Cat selection first.")
+                return
+            self.devil_selecting = True
+            self.devil_pending_card = card
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+            for var in self.dice_vars:
+                try:
+                    var.set(False)
+                except tk.TclError:
+                    pass
+            self.add_log("Devil Cat used: select up to 3 dice, then click Devil Cat again.")
+            self.show_devil_toast("Devil Cat active: select up to 3 dice.")
+            self.update_table_view()
+            self.render_hand()
+            self.render_cat_actions()
+            self.update_status()
+            return
+        if card.name == "Momma Cat":
+            if self.momma_uses >= 2:
+                self.show_toast("Momma Cat already at max!")
+                return
+            player.cat_cards.remove(card)
+            self.momma_uses += 1
+            if self.hand_revealed:
+                added_indices = self.apply_momma_cat(player, uses=1)
+                self.add_log("Momma Cat used: +2 dice this turn.")
+            else:
+                self.momma_pending += 1
+                self.add_log("Momma Cat used: +2 dice will draw at reveal.")
+            self.update_table_view()
+            self.render_cat_actions()
+            if self.hand_revealed:
+                if added_indices:
+                    self.start_roll_animation(
+                        indices=added_indices,
+                        on_finish=self.finish_reroll_animation,
+                    )
+                    self.update_status()
+                    self.safe_config(self.reroll_button, state="disabled")
+                else:
+                    self.render_hand()
+                    self.update_status()
+            else:
+                self.render_hand()
+                self.update_status()
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Feral Cat":
+            player.cat_cards.remove(card)
+            self.open_bag_view(player, return_to_shop=self.in_shop, mode="feral", card=card)
+            self.add_log("Feral Cat used: choose 1 die to convert to purple.")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Cat Burglar":
+            if self.cat_burglar_active and self.cat_burglar_player is player:
+                self.cancel_cat_burglar()
+            else:
+                self.open_cat_burglar(player, card)
+            return
+        if card.name == "Lap Cat":
+            player.cat_cards.remove(card)
+            self.game.rerolls_left += 1
+            self.add_log("Lap Cat used: +1 reroll this turn.")
+            self.update_table_view()
+            self.update_status()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Stray Cat":
+            player.cat_cards.remove(card)
+            self.open_dice_bank(player, card, return_to_shop=self.in_shop)
+            self.add_log("Stray Cat used: choose 2 dice from the Dice Bank.")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Fish Bone Cat":
+            player.cat_cards.remove(card)
+            player.bag.add("purple", 1)
+            self.add_log("Fish Bone Cat used: +1 purple die added to your bag.")
+            self.show_toast("1 purple dice added to bag!")
+            self.update_table_view()
+            self.update_status()
+            self.render_cat_actions()
+            if not self.in_shop:
+                self.open_bag_view(player, return_to_shop=False, mode="view")
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Cat Tackle":
+            player.cat_cards.remove(card)
+            self.open_dice_bank(player, card, return_to_shop=self.in_shop)
+            self.add_log("Cat Tackle used: draft 2 dice for another player.")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Raccoon Cat":
+            if self.raccoon_active and self.raccoon_player is player:
+                self.cancel_raccoon()
+                return
+            targets = [p for p in self.players if p is not player and p.kibbles >= 1]
+            if not targets:
+                self.add_log("Raccoon Cat used: no opponents with kibbles to steal.")
+                return
+            self.raccoon_active = True
+            self.raccoon_player = player
+            self.raccoon_card = card
+            self.add_log("Raccoon Cat used: select an opponent to steal kibbles.")
+            self.show_toast("Select a player to steal kibbles from!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Focus Cat":
+            if not player.objective_color:
+                self.add_log("Focus Cat requires an objective color.")
+                return
+            if not self.hand_revealed or not game.current_hand:
+                self.add_log("Focus Cat can only be used after your hand is revealed.")
+                return
+            if self.focus_selecting:
+                if self.focus_pending_card is card:
+                    self.cancel_focus_selection()
+                else:
+                    self.add_log("Finish Focus Cat selection first.")
+                return
+            self.focus_selecting = True
+            self.focus_pending_card = card
+            self.focus_pending_player = player
+            self.add_log("Focus Cat used: select a die to count as your objective color.")
+            self.show_toast("Select a die to focus!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Starlight Cat":
+            if self.in_shop:
+                self.add_log("Starlight Cat cannot be used during the shop.")
+                return
+            if not self.hand_revealed or not game.current_hand:
+                self.add_log("Starlight Cat can only be used after your hand is revealed.")
+                return
+            if self.is_starlight_active(player):
+                self.show_toast("Starlight Cat already active!")
+                return
+            purple_indices = [i for i, d in enumerate(game.current_hand) if d.color == "purple"]
+            if not purple_indices:
+                self.show_toast("No purple dice to affect.")
+                return
+            player.cat_cards.remove(card)
+            player.starlight_round = game.round_num
+            self.add_log("Starlight Cat used: purple dice are wild this round.")
+            self.show_toast("Starlight Cat active!")
+            self.update_table_view()
+            self.render_cat_actions()
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+            if purple_indices:
+                self.start_roll_animation(
+                    indices=purple_indices,
+                    on_finish=self.finish_reroll_animation,
+                )
+            else:
+                self.render_hand()
+                self.update_status()
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Narc Cat":
+            targets = [
+                p
+                for p in self.players
+                if p is not player and p.is_ai and p.bag.counts.get("purple", 0) > 0
+            ]
+            if not targets:
+                self.add_log("Narc Cat unavailable: no AI players have purple dice.")
+                self.show_toast("No AI players have purple dice.")
+                return
+            player.cat_cards.remove(card)
+            self.open_bag_view(player, return_to_shop=self.in_shop, mode="narc", card=card, actor=player)
+            self.add_log("Narc Cat used: select a purple die to remove from an AI bag.")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Greedy Cat":
+            if not self.guard_cat_action(card, "Greedy Cat"):
+                return
+            if self.greedy_active and self.greedy_player is player:
+                self.cancel_greedy_selection()
+                return
+            targets = [p for p in self.players if p is not player]
+            if not targets:
+                self.add_log("Greedy Cat unavailable: no opponents to target.")
+                self.show_toast("No opponents to target.")
+                return
+            self.greedy_active = True
+            self.greedy_player = player
+            self.greedy_card = card
+            self.add_log("Greedy Cat used: select an opponent to roll 1 fewer die next round.")
+            self.show_toast("Select an opponent to roll fewer dice next round!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Squirrel Cat":
+            if not self.guard_cat_action(card, "Squirrel Cat"):
+                return
+            if self.squirrel_active and self.squirrel_player is player:
+                self.cancel_squirrel_selection()
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.pummeling_active:
+                self.cancel_pummeling_selection()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            if self.void_cat_active:
+                self.cancel_void_cat()
+            if self.lioncut_active:
+                self.cancel_lioncut()
+            targets = [p for p in self.players if p is not player]
+            if not targets:
+                self.add_log("Squirrel Cat unavailable: no opponents to target.")
+                self.show_toast("No opponents to target.")
+                return
+            self.squirrel_active = True
+            self.squirrel_player = player
+            self.squirrel_card = card
+            self.add_log("Squirrel Cat used: select a player to receive 4 random dice.")
+            self.show_toast("Select a player to receive 4 random dice!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Shrodinger's Cat":
+            if not self.guard_cat_action(card, "Shrodinger's Cat"):
+                return
+            if self.in_shop:
+                self.add_log("Shrodinger's Cat cannot be used during the shop.")
+                return
+            if getattr(player, "rerolls_blocked", False):
+                self.add_log(f"{player.name}'s rerolls are blocked this round.")
+                self.show_toast("Rerolls blocked this round!")
+                return
+            if not self.hand_revealed or not game.current_hand:
+                self.add_log("Shrodinger's Cat can only be used after your hand is revealed.")
+                return
+            if self.rolling_active:
+                self.add_log("Wait for the roll to finish before using Shrodinger's Cat.")
+                return
+            if self.schrodinger_pending:
+                self.add_log("Shrodinger's Cat is already queued for scoring.")
+                return
+            player.cat_cards.remove(card)
+            self.schrodinger_pending = player
+            self.add_log("Shrodinger's Cat used: will reroll at scoring.")
+            self.show_toast("Shrodinger's Cat ready for scoring!")
+            self.update_table_view()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Thief in the Night":
+            if not self.guard_cat_action(card, "Thief in the Night"):
+                return
+            if self.thief_night_active and self.thief_night_player is player:
+                self.cancel_thief_night()
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.pummeling_active:
+                self.cancel_pummeling_selection()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            if self.void_cat_active:
+                self.cancel_void_cat()
+            if self.lioncut_active:
+                self.cancel_lioncut()
+            if self.squirrel_active:
+                self.cancel_squirrel_selection()
+            targets = [
+                p
+                for p in self.players
+                if p is not player and (p.cat_cards or p.dog_cards or p.stolen_dog_cards)
+            ]
+            if not targets:
+                self.add_log("Thief in the Night unavailable: no opponent cards to steal.")
+                self.show_toast("No opponent cards to steal.")
+                return
+            self.thief_night_active = True
+            self.thief_night_player = player
+            self.thief_night_card = card
+            self.add_log("Thief in the Night used: select any opponent card to steal.")
+            self.show_toast("Select a card to steal!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Pummeling Puma":
+            if self.pummeling_active and self.pummeling_player is player:
+                self.cancel_pummeling_selection()
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            if self.void_cat_active:
+                self.cancel_void_cat()
+            targets = [p for p in self.players if p is not player]
+            if not targets:
+                self.add_log("Pummeling Puma unavailable: no opponents to target.")
+                self.show_toast("No opponents to target.")
+                return
+            self.pummeling_active = True
+            self.pummeling_player = player
+            self.pummeling_card = card
+            self.add_log("Pummeling Puma used: select an opponent to block rerolls next round.")
+            self.show_toast("Select an opponent to block rerolls next round!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Void Cat":
+            if self.void_cat_active and self.void_cat_player is player:
+                self.cancel_void_cat()
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.pummeling_active:
+                self.cancel_pummeling_selection()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            targets = [p for p in self.players if p is not player and p.cat_cards]
+            if not targets:
+                self.add_log("Void Cat unavailable: no opponent cat cards to steal.")
+                self.show_toast("No opponent cat cards to steal.")
+                return
+            self.void_cat_active = True
+            self.void_cat_player = player
+            self.void_cat_card = card
+            self.add_log("Void Cat used: select an opponent cat card to steal.")
+            self.show_toast("Void Cat: select an opponent cat card to steal!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Lion Cut Cat":
+            if self.lioncut_active and self.lioncut_player is player:
+                self.cancel_lioncut()
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.pummeling_active:
+                self.cancel_pummeling_selection()
+            if self.void_cat_active:
+                self.cancel_void_cat()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            if not player.dog_cards:
+                self.add_log("Lion Cut Cat unavailable: you have no dog cards to move.")
+                self.show_toast("No dog cards to move.")
+                return
+            self.lioncut_active = True
+            self.lioncut_player = player
+            self.lioncut_card = card
+            self.add_log("Lion Cut Cat used: select one of your dog cards to move to stolen dogs.")
+            self.show_toast("Select a dog card to move to stolen dogs!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Bat Cat":
+            player.cat_cards.remove(card)
+            self.open_bag_view(player, return_to_shop=self.in_shop, mode="batcat", card=card)
+            self.add_log("Bat Cat used: discard 2 dice from your bag.")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Present Cat":
+            player.cat_cards.remove(card)
+            player.kibbles += 4
+            self.add_log("Present Cat used: +4 kibbles.")
+            if self.in_shop:
+                self.hide_shop_overlay()
+                self.show_shop()
+            self.update_table_view()
+            self.update_status()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+            return
+        if card.name == "Tolerant Cat":
+            if self.in_shop:
+                if player.free_dog_claims > 0 or getattr(player, "pending_tolerant_cards", []):
+                    self.add_log("Tolerant Cat already active in shop.")
+                    self.show_toast("Tolerant Cat already active.")
+                    return
+                pending = getattr(player, "pending_tolerant_cards", [])
+                pending.append(card)
+                player.pending_tolerant_cards = pending
+                player.free_dog_claims += 1
+                self.add_log("Tolerant Cat used: select a dog card to draft for free.")
+                self.hide_shop_overlay()
+                self.show_shop()
+            else:
+                player.cat_cards.remove(card)
+                player.free_dog_claims += 1
+                self.add_log("Tolerant Cat used: next dog card is free.")
+                self.trigger_shadow_dawg(player)
+            self.update_table_view()
+            self.update_status()
+            self.render_cat_actions()
+            return
+        if card.name == "Territorial Cat":
+            if self.territorial_active and self.territorial_player is player:
+                self.cancel_territorial_selection()
+                return
+            targets = [
+                p
+                for p in self.players
+                if p is not player and (p.dog_cards or p.stolen_dog_cards)
+            ]
+            if not targets:
+                self.add_log("Territorial Cat used: no opponent dog cards available.")
+                return
+            self.territorial_active = True
+            self.territorial_player = player
+            self.territorial_card = card
+            self.territorial_selected = None
+            self.add_log("Select an opponent dog card to block next round.")
+            self.show_toast("Select opponent's dog to disable next round!")
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Dogs Best Friend":
+            if not self.guard_cat_action(card, "Dogs Best Friend"):
+                return
+            if self.dogs_best_friend_active and self.dogs_best_friend_player is player:
+                self.cancel_dogs_best_friend()
+                self.show_toast("Dawg selector cancelled.")
+                return
+            if self.cat_burglar_active:
+                self.cancel_cat_burglar()
+            if self.territorial_active:
+                self.cancel_territorial_selection()
+            if self.raccoon_active:
+                self.cancel_raccoon()
+            if self.greedy_active:
+                self.cancel_greedy_selection()
+            if self.pummeling_active:
+                self.cancel_pummeling_selection()
+            if self.focus_selecting:
+                self.cancel_focus_selection()
+            if self.void_cat_active:
+                self.cancel_void_cat()
+            if not any(p.dog_cards or p.stolen_dog_cards for p in self.players):
+                self.add_log("Dogs Best Friend used: no dog cards available to copy.")
+                return
+            self.dogs_best_friend_active = True
+            self.dogs_best_friend_player = player
+            self.dogs_best_friend_card = card
+            self.dogs_best_friend_ignore_cancel = True
+            self.root.after(150, lambda: setattr(self, "dogs_best_friend_ignore_cancel", False))
+            self.add_log("Dogs Best Friend used: select a dog card to copy for this round.")
+            self.show_toast("Select a dog to duplicate.")
+            self.hide_dogs_best_friend_picker()
+            self.focus_human_player_panel()
+            self.update_table_view()
+            self.render_cat_actions()
+            return
+        if card.name == "Regal Cat":
+            before = player.kibbles
+            if game.use_cat_card(player, card):
+                gain = player.kibbles - before
+                self.add_log(f"Regal Cat used: +{gain:.1f} kibbles (capped at 6).")
+                self.update_table_view()
+                self.update_status()
+                self.render_cat_actions()
+                if self.in_shop:
+                    self.hide_shop_overlay()
+                    self.show_shop()
+                else:
+                    self.trigger_shadow_dawg(player)
+            return
+        if game.use_cat_card(player, card):
+            self.add_log(f"{player.name} used {card.name}.")
+            self.update_table_view()
+            self.update_status()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+
+    def on_show_bag(self) -> None:
+        game = self.game
+        if not game:
+            return
+        if self.dice_bank_active:
+            return
+        player = self.players[game.turn_index]
+        self.open_bag_view(player, return_to_shop=self.in_shop, mode="view")
+
+    def on_drag_start(self, event) -> None:
+        try:
+            self.drag_index = self.dice_checks.index(event.widget)
+        except ValueError:
+            self.drag_index = None
+        if self.drag_index is not None:
+            self.start_drag_preview(event, source_widget=event.widget)
+            self.hide_drag_source(event.widget)
+            self.show_drag_cover(self.drag_index)
+
+    def on_drag_motion(self, event) -> None:
+        if self.drag_index is None:
+            return
+        self.move_drag_preview(event.x_root, event.y_root)
+
+    def on_drag_drop(self, event) -> None:
+        game = self.game
+        if not game:
+            return
+        if self.drag_index is None:
+            return
+        if self.drag_preview and self.drag_preview.winfo_exists():
+            try:
+                self.drag_preview.place_forget()
+            except tk.TclError:
+                pass
+        target_widget = self.hand_frame.winfo_containing(event.x_root, event.y_root)
+        if self.reroll_drop_frame and self.is_widget_in(target_widget, self.reroll_drop_frame):
+            if self.drag_index < len(self.dice_vars):
+                try:
+                    self.dice_vars[self.drag_index].set(True)
+                except tk.TclError:
+                    pass
+                self.reroll_set_aside.add(self.drag_index)
+                self.reroll_set_aside_order = [
+                    idx for idx in self.reroll_set_aside_order if idx != self.drag_index
+                ]
+                self.reroll_set_aside_order.append(self.drag_index)
+                self.render_hand()
+                self.play_sound(self.drop_sound)
+            self.drag_index = None
+            self.clear_drag_preview()
+            return
+        if target_widget in self.dice_checks:
+            target_index = self.dice_checks.index(target_widget)
+        else:
+            target_index = len(self.dice_checks) - 1
+        if target_index != self.drag_index:
+            die = game.current_hand.pop(self.drag_index)
+            game.current_hand.insert(target_index, die)
+            self.shift_reroll_set_aside_indices(self.drag_index, target_index)
+            self.render_hand()
+        self.drag_index = None
+        self.clear_drag_preview()
+
+    def update_reroll_drop_display(self) -> None:
+        return
+
+    def shift_reroll_set_aside_indices(self, from_idx: int, to_idx: int) -> None:
+        if not self.reroll_set_aside:
+            return
+        if from_idx == to_idx:
+            return
+        updated = set()
+        for idx in self.reroll_set_aside:
+            if idx == from_idx:
+                updated.add(to_idx)
+            elif from_idx < to_idx and from_idx < idx <= to_idx:
+                updated.add(idx - 1)
+            elif to_idx <= idx < from_idx:
+                updated.add(idx + 1)
+            else:
+                updated.add(idx)
+        self.reroll_set_aside = updated
+        if self.reroll_set_aside_order:
+            new_order = []
+            for idx in self.reroll_set_aside_order:
+                if idx == from_idx:
+                    new_order.append(to_idx)
+                elif from_idx < to_idx and from_idx < idx <= to_idx:
+                    new_order.append(idx - 1)
+                elif to_idx <= idx < from_idx:
+                    new_order.append(idx + 1)
+                else:
+                    new_order.append(idx)
+            self.reroll_set_aside_order = [idx for idx in new_order if idx in self.reroll_set_aside]
+
+    def is_widget_in(self, widget: tk.Widget | None, container: tk.Widget | None) -> bool:
+        if not widget or not container:
+            return False
+        current = widget
+        while current is not None:
+            if current == container:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def start_drag_preview(self, event, source_widget: tk.Widget | None = None) -> None:
+        self.clear_drag_preview()
+        if self.drag_index is None or self.drag_index >= len(self.dice_checks):
+            return
+        img_name = ""
+        if source_widget:
+            try:
+                img_name = source_widget.cget("image")
+            except tk.TclError:
+                img_name = ""
+        if not img_name:
+            try:
+                img_name = self.dice_checks[self.drag_index].cget("image")
+            except tk.TclError:
+                img_name = ""
+        if not img_name and self.drag_hidden_image:
+            img_name = self.drag_hidden_image
+        if not img_name:
+            return
+        self.drag_preview = tk.Label(self.root, image=img_name, bg=self.roll_color("bg"))
+        self.drag_preview_image = img_name
+        self.drag_preview.lift()
+        die_w, die_h = self.get_die_image_size()
+        self.drag_preview_offset = (die_w // 2, die_h // 2)
+        self.move_drag_preview(event.x_root, event.y_root)
+
+    def move_drag_preview(self, x_root: int, y_root: int) -> None:
+        if not self.drag_preview or not self.drag_preview.winfo_exists():
+            return
+        offset_x, offset_y = self.drag_preview_offset
+        x = x_root - self.root.winfo_rootx() - offset_x
+        y = y_root - self.root.winfo_rooty() - offset_y
+        try:
+            self.drag_preview.place(x=x, y=y)
+        except tk.TclError:
+            pass
+
+    def clear_drag_preview(self) -> None:
+        if self.drag_preview and self.drag_preview.winfo_exists():
+            try:
+                self.drag_preview.destroy()
+            except tk.TclError:
+                pass
+        self.drag_preview = None
+        self.drag_preview_image = None
+        self.hide_drag_cover()
+        self.show_drag_source()
+
+    def hide_drag_source(self, widget: tk.Widget) -> None:
+        if not widget or not widget.winfo_exists():
+            return
+        try:
+            self.drag_hidden_widget = widget
+            self.drag_hidden_image = widget.cget("image")
+            self.drag_hidden_text = widget.cget("text")
+            self.drag_hidden_width = widget.cget("width")
+            self.drag_hidden_height = widget.cget("height")
+            self.drag_hidden_select_image = widget.cget("selectimage")
+            self.drag_hidden_active_image = widget.cget("activeimage")
+            die_w, die_h = self.get_die_image_size()
+            if not self.drag_transparent_image:
+                self.drag_transparent_image = tk.PhotoImage(width=die_w, height=die_h)
+            widget.configure(
+                image=self.drag_transparent_image,
+                selectimage=self.drag_transparent_image,
+                activeimage=self.drag_transparent_image,
+                text="",
+                width=die_w,
+                height=die_h,
+            )
+            widget.image = self.drag_transparent_image
+        except tk.TclError:
+            self.drag_hidden_widget = None
+            self.drag_hidden_image = None
+            self.drag_hidden_text = None
+            self.drag_hidden_width = None
+            self.drag_hidden_height = None
+            self.drag_hidden_select_image = None
+            self.drag_hidden_active_image = None
+
+    def show_drag_source(self) -> None:
+        if not self.drag_hidden_widget or not self.drag_hidden_widget.winfo_exists():
+            self.drag_hidden_widget = None
+            self.drag_hidden_image = None
+            self.drag_hidden_text = None
+            self.drag_hidden_width = None
+            self.drag_hidden_height = None
+            return
+        try:
+            self.drag_hidden_widget.configure(
+                image=self.drag_hidden_image or "",
+                text=self.drag_hidden_text or "",
+                width=self.drag_hidden_width or 64,
+                height=self.drag_hidden_height or 64,
+                selectimage=self.drag_hidden_select_image or "",
+                activeimage=self.drag_hidden_active_image or "",
+            )
+        except tk.TclError:
+            pass
+        self.drag_hidden_widget = None
+        self.drag_hidden_image = None
+        self.drag_hidden_text = None
+        self.drag_hidden_width = None
+        self.drag_hidden_height = None
+        self.drag_hidden_select_image = None
+        self.drag_hidden_active_image = None
+
+    def show_drag_cover(self, index: int) -> None:
+        self.hide_drag_cover()
+        if index < 0 or index >= len(self.dice_frames):
+            return
+        frame = self.dice_frames[index]
+        if not frame or not frame.winfo_exists():
+            return
+        die_w, die_h = self.get_die_image_size()
+        cover = tk.Frame(frame, width=die_w, height=die_h, bg=self.roll_color("panel_dark"))
+        cover.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+        cover.lift()
+        self.drag_cover = cover
+        self.drag_cover_index = index
+
+    def hide_drag_cover(self) -> None:
+        if self.drag_cover and self.drag_cover.winfo_exists():
+            try:
+                self.drag_cover.destroy()
+            except tk.TclError:
+                pass
+        self.drag_cover = None
+        self.drag_cover_index = None
+
+    def get_selected_indices(self) -> list[int]:
+        if self.reroll_set_aside:
+            return sorted(self.reroll_set_aside)
+        indices = []
+        for i, var in enumerate(self.dice_vars):
+            try:
+                if var.get():
+                    indices.append(i)
+            except tk.TclError:
+                continue
+        return indices
+
+    def update_die_border(self, index: int) -> None:
+        if index >= len(self.dice_frames):
+            return
+        frame = self.dice_frames[index]
+        if not frame.winfo_exists():
+            return
+        try:
+            selected = self.dice_vars[index].get()
+        except tk.TclError:
+            return
+        if self.focus_selecting and selected:
+            self.apply_focus_to_die(index)
+            return
+        game = self.game
+        player = self.players[game.turn_index] if game and self.players else None
+        silent_selection = (
+            game
+            and player
+            and not self.in_shop
+            and not player.is_ai
+            and (game.rerolls_left > 0 or self.nimble_selecting or self.devil_selecting)
+        )
+        if (
+            game
+            and player
+            and not player.is_ai
+            and self.hand_revealed
+            and game.rerolls_left <= 0
+            and not self.nimble_selecting
+            and not self.devil_selecting
+        ):
+            silent_selection = True
+        if game and player and player.is_ai:
+            silent_selection = self.hand_revealed
+        try:
+            frame.config(
+                highlightbackground=(
+                    self.roll_color("panel_dark")
+                    if silent_selection
+                    else (self.roll_color("accent") if selected else self.roll_color("panel_dark"))
+                )
+            )
+        except tk.TclError:
+            return
+        if self.nimble_selecting:
+            self.update_status()
+
+    def apply_nimble_reroll(self, from_inventory: bool = False) -> None:
+        game = self.game
+        if not game:
+            return
+        if not self.nimble_selecting:
+            return
+        indices = self.get_selected_indices()
+        if not indices:
+            self.add_log("Select dice for nimble reroll.")
+            return
+        indices = indices[:2]
+        player = self.players[game.turn_index]
+        if getattr(player, "rerolls_blocked", False):
+            self.add_log(f"{player.name}'s rerolls are blocked this round.")
+            self.show_toast("Rerolls blocked this round!")
+            self.nimble_selecting = False
+            self.nimble_pending_card = None
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+            self.render_hand()
+            self.update_status()
+            return
+        if self.nimble_pending_card and self.nimble_pending_card in player.cat_cards:
+            player.cat_cards.remove(self.nimble_pending_card)
+            self.update_table_view()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+        for idx in indices:
+            die = game.current_hand[idx]
+            game.current_hand[idx] = type(die)(die.color, random.randint(1, 6))
+        for var in self.dice_vars:
+            var.set(False)
+        self.nimble_selecting = False
+        self.nimble_pending_card = None
+        self.auto_sorted_on_zero = False
+        self.scoring_highlight_indices = set()
+        self.score_confirm_pending = False
+        self.start_roll_animation(indices=indices, on_finish=self.finish_reroll_animation)
+        self.show_nimble_toast("Nimble Roll Exited")
+
+    def apply_devil_reroll(self, from_inventory: bool = False) -> None:
+        game = self.game
+        if not game:
+            return
+        if not self.devil_selecting:
+            return
+        indices = self.get_selected_indices()
+        if not indices:
+            self.add_log("Select dice for Devil Cat.")
+            return
+        indices = indices[:3]
+        player = self.players[game.turn_index]
+        if getattr(player, "rerolls_blocked", False):
+            self.add_log(f"{player.name}'s rerolls are blocked this round.")
+            self.show_toast("Rerolls blocked this round!")
+            self.devil_selecting = False
+            self.devil_pending_card = None
+            self.reroll_set_aside = set()
+            self.reroll_set_aside_order = []
+            self.render_hand()
+            self.update_status()
+            return
+        if self.devil_pending_card and self.devil_pending_card in player.cat_cards:
+            card_to_return = self.devil_pending_card
+            player.cat_cards.remove(self.devil_pending_card)
+            if self.game:
+                self.game.cat_deck.add(card_to_return)
+            self.update_table_view()
+            self.render_cat_actions()
+            self.trigger_shadow_dawg(player)
+        for idx in indices:
+            die = game.current_hand[idx]
+            game.current_hand[idx] = type(die)(die.color, 6)
+        for var in self.dice_vars:
+            var.set(False)
+        self.devil_selecting = False
+        self.devil_pending_card = None
+        self.auto_sorted_on_zero = False
+        self.scoring_highlight_indices = set()
+        self.score_confirm_pending = False
+        self.start_roll_animation(indices=indices, on_finish=self.finish_reroll_animation)
+        self.show_devil_toast("Devil Cat applied!")
+
+    def sort_hand_by_value(self) -> None:
+        game = self.game
+        if not game or not game.current_hand:
+            return
+        game.current_hand.sort(key=lambda d: d.value)
+        self.render_hand()
+
+    def show_nimble_toast(self, text: str) -> None:
+        if self.nimble_toast and self.nimble_toast.winfo_exists():
+            self.nimble_toast.destroy()
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        tk.Label(
+            toast,
+            text=text,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", padx=16, pady=10)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.nimble_toast = toast
+        self.root.after(1800, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_devil_toast(self, text: str) -> None:
+        if self.devil_toast and self.devil_toast.winfo_exists():
+            self.devil_toast.destroy()
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        tk.Label(
+            toast,
+            text=text,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["accent"],
+        ).pack(anchor="center", padx=16, pady=10)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.devil_toast = toast
+        self.root.after(1800, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def ensure_toast_log_frame(self) -> None:
+        peach_border = "#f2b8a0"
+        if self.toast_log_frame and self.toast_log_frame.winfo_exists():
+            self.safe_config(
+                self.toast_log_frame,
+                bg=self.theme["panel_dark"],
+                highlightthickness=2,
+                highlightbackground=peach_border,
+                highlightcolor=peach_border,
+                bd=0,
+            )
+            return
+        self.toast_log_frame = tk.Frame(
+            self.root,
+            bg=self.theme["panel_dark"],
+            highlightthickness=2,
+            highlightbackground=peach_border,
+            highlightcolor=peach_border,
+            bd=0,
+        )
+        self.toast_log_frame.place(relx=0.0, rely=1.0, anchor="sw", x=8, y=-8)
+        self.toast_log_frame.lift()
+
+    def append_toast_log(self, text: str) -> None:
+        message = " ".join(text.strip().splitlines())
+        if not message:
+            return
+        self.toast_log.append(message)
+        self.toast_log = self.toast_log[-5:]
+        self.ensure_toast_log_frame()
+        if not self.toast_log_frame or not self.toast_log_frame.winfo_exists():
+            return
+        for child in self.toast_log_frame.winfo_children():
+            if child.winfo_exists():
+                child.destroy()
+        for line in self.toast_log:
+            tk.Label(
+                self.toast_log_frame,
+                text=line,
+                font=self.theme["small_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+                anchor="w",
+                justify="left",
+            ).pack(anchor="w", padx=8, pady=2)
+        self.toast_log_frame.lift()
+
+    def register_toast_widget(
+        self,
+        widget: tk.Widget,
+        parent: tk.Widget,
+        slot: str,
+        *,
+        relx: float,
+        rely: float,
+        anchor: str,
+        x: int = 0,
+        y: int = 0,
+        gap: int = 8,
+    ) -> None:
+        key = (parent, slot)
+        entries = self.toast_slots.setdefault(key, [])
+        entries = [entry for entry in entries if entry["widget"].winfo_exists()]
+        self.toast_slots[key] = entries
+        entries.append(
+            {
+                "widget": widget,
+                "relx": relx,
+                "rely": rely,
+                "anchor": anchor,
+                "x": x,
+                "y": y,
+                "gap": gap,
+            }
+        )
+        widget.bind(
+            "<Destroy>",
+            lambda _e, p=parent, s=slot: self.reflow_toast_slot(p, s),
+            add="+",
+        )
+        self.reflow_toast_slot(parent, slot)
+
+    def reflow_toast_slot(self, parent: tk.Widget, slot: str) -> None:
+        key = (parent, slot)
+        entries = self.toast_slots.get(key, [])
+        live_entries = [entry for entry in entries if entry["widget"].winfo_exists()]
+        if not live_entries:
+            self.toast_slots.pop(key, None)
+            return
+        self.toast_slots[key] = live_entries
+        offset = 0
+        for entry in live_entries:
+            widget = entry["widget"]
+            try:
+                widget.update_idletasks()
+            except tk.TclError:
+                continue
+            place_y = entry["y"]
+            if slot in ("top_right", "center_stack"):
+                place_y += offset
+                offset += widget.winfo_reqheight() + entry["gap"]
+            elif slot == "bottom_center":
+                place_y -= offset
+                offset += widget.winfo_reqheight() + entry["gap"]
+            try:
+                widget.place(
+                    relx=entry["relx"],
+                    rely=entry["rely"],
+                    anchor=entry["anchor"],
+                    x=entry["x"],
+                    y=place_y,
+                )
+                widget.lift()
+            except tk.TclError:
+                continue
+
+    def open_dice_bank(self, player: Player, card: Card, return_to_shop: bool) -> None:
+        self.dice_bank_active = True
+        self.dice_bank_player = player
+        self.dice_bank_card = card
+        self.dice_bank_return_to_shop = return_to_shop
+        self.dice_bank_selection = {c: 0 for c in BASE_COLORS}
+        if card and card.name == "Cat Tackle":
+            self.dice_bank_info.config(text="Select 2 dice to give to another player.")
+            names = [p.name for p in self.players]
+            if names:
+                default_name = next((n for n in names if n != player.name), names[0])
+                self.dice_bank_target_var.set(default_name)
+                menu = self.dice_bank_target_menu["menu"]
+                menu.delete(0, "end")
+                for name in names:
+                    menu.add_command(label=name, command=lambda n=name: self.dice_bank_target_var.set(n))
+            self.dice_bank_target_row.pack(anchor="center", pady=(0, 6))
+        else:
+            self.dice_bank_info.config(text="Select 2 dice to add to your bag.")
+            self.dice_bank_target_row.pack_forget()
+        for color in BASE_COLORS:
+            self.dice_bank_counts[color].config(text="0")
+            self.dice_bank_faces[color].config(image="", text="")
+        self.enter_dice_bank_layout()
+        self.reroll_button.config(state="disabled")
+        self.end_turn_button.config(state="disabled")
+        self.nimble_button.config(state="disabled")
+
+    def add_dice_bank_choice(self, color: str) -> None:
+        if not self.dice_bank_active:
+            return
+        total = sum(self.dice_bank_selection.values())
+        if total >= 2:
+            return
+        self.dice_bank_selection[color] += 1
+        self.dice_bank_counts[color].config(text=str(self.dice_bank_selection[color]))
+        face_value = random.randint(1, 6)
+        img = self.dice_images_small.get(color, {}).get(face_value)
+        if img:
+            self.dice_bank_faces[color].config(image=img, text="")
+            self.dice_bank_faces[color].image = img
+        else:
+            self.dice_bank_faces[color].config(
+                image="",
+                text=f"{color} {face_value}",
+                font=self.theme["body_font"],
+                fg=self.theme["text"],
+                bg=self.theme["panel_dark"],
+            )
+
+    def confirm_dice_bank(self) -> None:
+        if not self.dice_bank_active or not self.dice_bank_player:
+            return
+        total = sum(self.dice_bank_selection.values())
+        if total != 2:
+            self.add_log("Select exactly 2 dice from the Dice Bank.")
+            return
+        target = self.dice_bank_player
+        if self.dice_bank_card and self.dice_bank_card.name == "Cat Tackle":
+            target_name = self.dice_bank_target_var.get()
+            target = next((p for p in self.players if p.name == target_name), None)
+            if not target:
+                self.add_log("Select a player to receive the dice.")
+                return
+            if target is self.dice_bank_player:
+                self.add_log("Select another player to receive the dice.")
+                self.show_toast("Select another player!")
+                return
+        for color, count in self.dice_bank_selection.items():
+            if count:
+                target.bag.add(color, count)
+        if self.dice_bank_card and self.dice_bank_card.name == "Cat Tackle":
+            if self.game:
+                self.game.cat_deck.add(self.dice_bank_card)
+        if self.dice_bank_card and not self.in_shop:
+            self.trigger_shadow_dawg(self.dice_bank_player)
+        self.dice_bank_active = False
+        self.dice_bank_player = None
+        self.dice_bank_card = None
+        self.update_table_view()
+        self.update_status()
+        self.exit_dice_bank_layout()
+
+    def cancel_dice_bank(self) -> None:
+        if not self.dice_bank_active:
+            return
+        if self.dice_bank_player and self.dice_bank_card:
+            self.dice_bank_player.cat_cards.append(self.dice_bank_card)
+        self.dice_bank_active = False
+        self.dice_bank_player = None
+        self.dice_bank_card = None
+        self.dice_bank_selection = {c: 0 for c in BASE_COLORS}
+        self.dice_bank_target_row.pack_forget()
+        for color in BASE_COLORS:
+            self.dice_bank_faces[color].config(image="", text="")
+        self.update_table_view()
+        self.render_cat_actions()
+        self.exit_dice_bank_layout()
+
+    def reset_dice_bank_selection(self) -> None:
+        if not self.dice_bank_active:
+            return
+        self.dice_bank_selection = {c: 0 for c in BASE_COLORS}
+        for color in BASE_COLORS:
+            self.dice_bank_counts[color].config(text="0")
+            self.dice_bank_faces[color].config(image="", text="")
+
+    def finish_round(self) -> None:
+        game = self.game
+        if not game:
+            return
+        self.add_log("Preparing shop phase.")
+        self.add_log(f"Scores this round: {len(self.scores_this_round)}")
+        if self.scores_this_round:
+            leader_score = max((p.total_score for p in self.players), default=0.0)
+            entry = self.ensure_round_entry(game.round_num)
+            for player, result in self.scores_this_round:
+                street_count = sum(
+                        1
+                        for c in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+                        if c.name == "Street Dawg"
+                    )
+                if street_count and player.total_score < leader_score:
+                    bonus_cap = max(0, leader_score - player.total_score)
+                    bonus = min(5 * street_count, bonus_cap)
+                    if bonus <= 0:
+                        continue
+                    result.extra_points += bonus
+                    player.total_score += bonus
+                    for score in entry["scores"]:
+                        if score["player"] == player.name:
+                            score["total"] += bonus
+                            suffix = " + Street Dawg" if street_count == 1 else f" + Street Dawg x{street_count}"
+                            score["name"] = f"{score['name']}{suffix}"
+                            score["extra_points"] = score.get("extra_points", 0) + bonus
+                            bonuses = score.get("bonuses", [])
+                            bonuses.append(
+                                {"name": "Street Dawg", "points": bonus, "count": street_count}
+                            )
+                            score["bonuses"] = bonuses
+                            break
+                    self.add_log(f"{player.name} gained +{bonus} from Street Dawg.")
+        game.award_kibbles(self.scores_this_round)
+        for player in self.players:
+            daredevils = [
+                c
+                for c in (player.dog_cards + player.stolen_dog_cards)
+                if c.name == "Daredevil Dawg"
+            ]
+            for card in list(daredevils):
+                if random.randint(1, 4) == 1:
+                    if card in player.dog_cards:
+                        player.dog_cards.remove(card)
+                    elif card in player.stolen_dog_cards:
+                        player.stolen_dog_cards.remove(card)
+                    game.dog_deck.add(card)
+                    self.add_log(
+                        f"{player.name}'s Daredevil Dawg returned to the deck."
+                    )
+                    self.show_toast(
+                        f"{player.name}'s Daredevil Dawg returned to the deck!"
+                    )
+        for player in self.players:
+            if player.temp_dog_cards:
+                player.temp_dog_cards.clear()
+        if self.dogs_best_friend_active:
+            self.dogs_best_friend_active = False
+            self.dogs_best_friend_player = None
+            self.dogs_best_friend_card = None
+            self.hide_dogs_best_friend_picker()
+        self.update_table_view()
+        if game.round_num >= 9:
+            self.end_game()
+            return
+        game.prepare_shop()
+        self.shop_reshuffle_notified = {"cat": False, "dog": False}
+        self.shop_player_index = 0
+        self.shop_order = self.build_clockwise_order(self.round_start_index)
+        self.shop_purchase_counts = [0] * len(self.players)
+        self.show_shop()
+
+    def show_shop(self) -> None:
+        game = self.game
+        if not game:
+            return
+        entering_shop = not self.in_shop
+        if self.global_options_frame:
+            self.global_options_frame.lift()
+        self.root.update_idletasks()
+        self.add_log("Shop phase started.")
+        if self.scorecard_panel_visible:
+            self.toggle_scorecard()
+        self.enter_shop_layout()
+        self.hide_shop_overlay()
+        self.in_shop = True
+        self.update_pause_button_visibility()
+        if entering_shop:
+            self.focus_human_player_panel()
+            self.reset_shop_memory()
+        self.nimble_selecting = False
+        self.nimble_pending_card = None
+        self.devil_selecting = False
+        self.devil_pending_card = None
+        self.dice_bank_active = False
+        self.reroll_button.config(state="disabled")
+        self.end_turn_button.config(state="disabled")
+        self.nimble_button.config(state="disabled")
+        for widget in self.shop_frame.winfo_children():
+            widget.destroy()
+        self.shop_overlay_visible = False
+        if self.shop_player_index >= len(self.shop_order):
+            self.advance_round()
+            return
+        player_idx = self.get_shop_player_index()
+        if player_idx is None:
+            self.advance_round()
+            return
+        player = self.players[player_idx]
+        if self.pending_cat_sale and self.pending_cat_sale.get("player") is not player:
+            self.pending_cat_sale = None
+        self.render_cat_actions()
+        self.stop_ai_hand_cycle(clear=True)
+        self.stop_ai_hand_blink(clear=True)
+        self.shop_hand_slots = {"cat": {}, "dog": {}}
+        self.shop_card_widgets = {"cat": {}, "dog": {}}
+        self.restock_shop_cards("cat")
+        self.restock_shop_cards("dog")
+        self.filter_secret_shop_cards(player)
+        self.update_shop_memory()
+
+        body = tk.Frame(self.shop_frame, bg=self.theme["shop_bg"])
+        body.pack(side="top", fill="x", expand=False, pady=(0, 6))
+        body_inner = tk.Frame(body, bg=self.theme["shop_bg"])
+        body_inner.grid(row=0, column=0, sticky="nsew")
+        body.grid_rowconfigure(0, weight=0)
+        body.grid_columnconfigure(0, weight=1)
+        body_inner.grid_columnconfigure(0, weight=1)
+        body_inner.grid_rowconfigure(1, weight=0)
+        self.shop_body_inner = body_inner
+
+        purchases = 0
+        if 0 <= player_idx < len(self.shop_purchase_counts):
+            purchases = self.shop_purchase_counts[player_idx]
+        header_row = tk.Frame(body_inner, bg=self.theme["shop_bg"])
+        header_row.grid(row=0, column=0, sticky="ew", pady=0)
+        header_row.grid_columnconfigure(0, weight=1)
+        header_row.grid_columnconfigure(1, weight=1)
+        header_row.grid_columnconfigure(2, weight=1)
+        self.shop_header_label = tk.Label(
+            header_row,
+            text="Shop",
+            font=self.theme["subheader_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        )
+        self.shop_header_label.grid(row=0, column=0, columnspan=3, sticky="n", pady=(0, 2))
+        status_row = tk.Frame(header_row, bg=self.theme["shop_bg"])
+        status_row.grid(row=1, column=0, sticky="w", padx=(10, 4))
+        tk.Label(
+            status_row,
+            text=f" - {player.name}",
+            font=self.theme["subheader_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        kibble_img = self.get_kibble_image(player.kibbles)
+        if kibble_img:
+            lbl = tk.Label(status_row, image=kibble_img, bg=self.theme["shop_bg"])
+            lbl.image = kibble_img
+            lbl.pack(side="left", padx=(8, 4))
+        limit = self.get_shop_purchase_limit(player)
+        tk.Label(
+            status_row,
+            text=f"{int(player.kibbles)} | Purchases: {purchases}/{limit}",
+            font=self.theme["subheader_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        done_img = self.ui_images.get("done_shopping")
+        done_img_gray = None
+        if done_img:
+            done_img_gray = self.make_grayscale_image(done_img)
+
+        def on_done_shopping() -> None:
+            if hasattr(self, "done_shopping_button") and self.done_shopping_button:
+                try:
+                    if str(self.done_shopping_button.cget("state")) == "disabled":
+                        return
+                except tk.TclError:
+                    return
+            if done_img and done_img_gray and self.done_shopping_button:
+                self.done_shopping_button.configure(image=done_img_gray)
+                self.done_shopping_button.image = done_img_gray
+            if self.done_shopping_button:
+                self.done_shopping_button.configure(state="disabled")
+            self.next_shop_player()
+
+        if done_img:
+            done_btn = tk.Button(
+                header_row,
+                image=done_img,
+                command=on_done_shopping,
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            done_btn.image = done_img
+        else:
+            done_btn = tk.Button(
+                header_row,
+                text="Done Shopping",
+                command=on_done_shopping,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=10,
+                pady=4,
+            )
+        done_btn.grid(row=1, column=2, sticky="e", padx=8, pady=0)
+        self.done_shopping_button = done_btn
+        self.start_shop_header_flash()
+        self.shop_frame.update_idletasks()
+        body_inner.update_idletasks()
+        shop_metrics = self.get_shop_layout_metrics()
+        cards_frame = tk.Frame(body_inner, bg=self.theme["shop_bg"])
+        cards_frame.grid(row=1, column=0, sticky="n", pady=4)
+        cards_frame.grid_columnconfigure(0, weight=0)
+        cards_frame.grid_columnconfigure(1, weight=0)
+        cards_frame.grid_anchor("center")
+        self.make_kibble_label(
+            cards_frame,
+            "Cat Cards",
+            2,
+            self.theme["shop_bg"],
+            self.theme["subheader_font"],
+            self.theme["text"],
+        ).grid(row=0, column=0, sticky="n")
+        alpha_count = sum(
+            1 for c in (player.dog_cards + player.stolen_dog_cards) if c.name == "Alpha Dawg"
+        )
+        dog_cost = max(0, 4 - alpha_count)
+        self.make_kibble_label(
+            cards_frame,
+            "Dog Cards",
+            dog_cost,
+            self.theme["shop_bg"],
+            self.theme["subheader_font"],
+            self.theme["text"],
+        ).grid(row=0, column=1, sticky="n")
+        cat_row = tk.Frame(cards_frame, bg=self.theme["shop_bg"])
+        cat_row.grid(row=1, column=0, sticky="nsew", pady=(2, 4))
+        cat_row.grid_columnconfigure(0, weight=1)
+        dog_row = tk.Frame(cards_frame, bg=self.theme["shop_bg"])
+        dog_row.grid(row=1, column=1, sticky="nsew", pady=(2, 4))
+        dog_row.grid_columnconfigure(0, weight=1)
+
+        cat_wrap = tk.Frame(cat_row, bg=self.theme["shop_bg"])
+        cat_wrap.grid(row=0, column=0, sticky="n")
+        if self.cat_deck_image:
+            deck_lbl = tk.Label(cat_wrap, image=self.cat_deck_image, bg=self.theme["shop_bg"])
+            deck_lbl.image = self.cat_deck_image
+            deck_lbl.config(cursor="hand2")
+            deck_lbl.bind("<Button-1>", lambda _e: self.reshuffle_shop_section("cat"))
+            deck_lbl.pack(side="left", padx=(0, shop_metrics["card_gap"]))
+        cat_grid = tk.Frame(cat_wrap, bg=self.theme["shop_bg"])
+        cat_grid.pack(side="left")
+
+        dog_wrap = tk.Frame(dog_row, bg=self.theme["shop_bg"])
+        dog_wrap.grid(row=0, column=0, sticky="n")
+        if self.dog_deck_image:
+            deck_lbl = tk.Label(dog_wrap, image=self.dog_deck_image, bg=self.theme["shop_bg"])
+            deck_lbl.image = self.dog_deck_image
+            deck_lbl.config(cursor="hand2")
+            deck_lbl.bind("<Button-1>", lambda _e: self.reshuffle_shop_section("dog"))
+            deck_lbl.pack(side="left", padx=(0, shop_metrics["card_gap"]))
+        dog_grid = tk.Frame(dog_wrap, bg=self.theme["shop_bg"])
+        dog_grid.pack(side="left")
+
+        row_width = self.shop_frame.winfo_width() or body_inner.winfo_width() or body.winfo_width()
+        card_width = max(
+            (img.width() for kind in self.card_images.values() for img in kind.values() if img),
+            default=80,
+        )
+        cat_deck_w = self.cat_deck_image.width() if self.cat_deck_image else 0
+        dog_deck_w = self.dog_deck_image.width() if self.dog_deck_image else 0
+        available_w = max(220, (row_width // 2) - max(cat_deck_w, dog_deck_w) - shop_metrics["side_reserve"])
+        cols = max(1, available_w // max(1, (card_width + shop_metrics["card_gap"])))
+        cols += shop_metrics["cols_bonus"]
+
+        cat_rendered = 0
+        for i, card in enumerate(game.shop_cats):
+            if not card:
+                continue
+            animate = ("cat", i) in self.shop_flip_targets
+            hand_label = self._card_button(
+                cat_grid,
+                player,
+                card,
+                i,
+                "cat",
+                horizontal=True,
+                animate=animate,
+                grid=(i // cols, i % cols),
+            )
+            if hand_label:
+                self.shop_hand_slots["cat"][i] = hand_label
+            if animate:
+                self.shop_flip_targets.discard(("cat", i))
+            cat_rendered += 1
+        if cat_rendered == 0:
+            tk.Label(
+                cat_grid,
+                text="(No cat cards available)",
+                font=self.theme["body_font"],
+                bg=self.theme["shop_bg"],
+                fg=self.theme["muted"],
+            ).grid(row=0, column=0, padx=6, pady=2)
+
+        dog_rendered = 0
+        for i, card in enumerate(game.shop_dogs):
+            if not card:
+                continue
+            animate = ("dog", i) in self.shop_flip_targets
+            hand_label = self._card_button(
+                dog_grid,
+                player,
+                card,
+                i,
+                "dog",
+                horizontal=True,
+                animate=animate,
+                grid=(i // cols, i % cols),
+            )
+            if hand_label:
+                self.shop_hand_slots["dog"][i] = hand_label
+            if animate:
+                self.shop_flip_targets.discard(("dog", i))
+            dog_rendered += 1
+        if dog_rendered == 0:
+            tk.Label(
+                dog_grid,
+                text="(No dog cards available)",
+                font=self.theme["body_font"],
+                bg=self.theme["shop_bg"],
+                fg=self.theme["muted"],
+            ).grid(row=0, column=0, padx=6, pady=2)
+
+        if player.is_ai:
+            self.root.after(500, self.run_ai_shop)
+        if self.pending_cat_purchase and self.pending_cat_purchase["player"] is player:
+            self.render_cat_replace_prompt()
+        if self.pending_dog_purchase and self.pending_dog_purchase["player"] is player:
+            self.render_dog_replace_prompt()
+        if self.pending_cat_sale and self.pending_cat_sale["player"] is player:
+            self.render_cat_sell_prompt()
+        if self.pending_dog_sale and self.pending_dog_sale["player"] is player:
+            self.render_dog_sell_prompt()
+
+    def reshuffle_shop_section(self, kind: str) -> None:
+        game = self.game
+        if not game or not self.in_shop:
+            return
+        if kind not in ("cat", "dog"):
+            return
+        if self.pending_cat_purchase or self.pending_dog_purchase:
+            self.show_toast("Finish exchange first")
+            return
+        player_idx = self.get_shop_player_index()
+        if player_idx is None:
+            return
+        player = self.players[player_idx]
+        if player.is_ai:
+            return
+        deck = game.cat_deck if kind == "cat" else game.dog_deck
+        exclude = []
+        if kind == "cat":
+            for p in self.players:
+                exclude.extend(p.cat_cards)
+        else:
+            for p in self.players:
+                exclude.extend(p.dog_cards)
+                exclude.extend(p.stolen_dog_cards)
+        counts: dict[tuple[str, str], int] = {}
+        for card in exclude:
+            key = (card.name, card.kind)
+            counts[key] = counts.get(key, 0) + 1
+        available = 0
+        for card in deck._base:
+            key = (card.name, card.kind)
+            if counts.get(key, 0) > 0:
+                counts[key] -= 1
+                continue
+            available += 1
+        if available <= 0:
+            label = "cat" if kind == "cat" else "dog"
+            self.add_log(f"No {label} cards left in the deck.")
+            self.show_toast(f"No {label} cards left.")
+            return
+        if player.kibbles < 1:
+            self.add_log("Cannot reshuffle shop (cost).")
+            self.show_toast("Not enough kibble")
+            return
+        player_index = -1
+        try:
+            player_index = self.players.index(player)
+        except ValueError:
+            player_index = -1
+        if 0 <= player_index < len(self.shop_purchase_counts):
+            limit = self.get_shop_purchase_limit(player)
+            if self.shop_purchase_counts[player_index] >= limit:
+                self.add_log(f"Shop purchase limit reached ({limit}).")
+                self.show_toast("Shop purchase limit reached")
+                return
+        player.kibbles -= 1
+        if 0 <= player_index < len(self.shop_purchase_counts):
+            self.shop_purchase_counts[player_index] += 1
+        shop_cards = game.shop_cats if kind == "cat" else game.shop_dogs
+        draw_fn = game.draw_cat if kind == "cat" else game.draw_dog
+        for card in shop_cards:
+            if card:
+                deck.add(card)
+        for idx in range(len(shop_cards)):
+            shop_cards[idx] = None
+        for idx in range(len(shop_cards)):
+            shop_cards[idx] = draw_fn()
+            if shop_cards[idx]:
+                self.shop_flip_targets.add((kind, idx))
+        self.add_log(f"{player.name} reshuffled the {kind} shop for 1 kibble.")
+        self.update_table_view()
+        self.show_shop()
+
+    def enter_shop_layout(self) -> None:
+        self.hide_roll_border()
+        if self.shop_layout_active:
+            return
+        self.shop_layout_active = True
+        self.game_layout_active = False
+        self.start_shop_sound()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        if self.compact_player_panels:
+            self.shop_bottom_restore = {
+                "height": self.bottom_frame.winfo_height(),
+                "propagate": self.bottom_frame.grid_propagate(),
+            }
+            table_h = max(1, self.table_frame.winfo_height())
+            bottom_h = max(120, min(220, int(table_h * 0.22)))
+            self.bottom_frame.config(height=bottom_h)
+            self.bottom_frame.grid_propagate(False)
+            self.table_frame.grid_rowconfigure(1, weight=0, minsize=bottom_h)
+        self.shop_backdrop.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        self.update_shop_layout_geometry()
+        self.shop_backdrop.lift()
+        if self.compact_player_panels:
+            self.bottom_frame.lift(aboveThis=self.shop_backdrop)
+
+    def exit_shop_layout(self) -> None:
+        if not self.shop_layout_active:
+            return
+        self.shop_layout_active = False
+        if self.ai_shop_thinking_job:
+            try:
+                self.root.after_cancel(self.ai_shop_thinking_job)
+            except Exception:
+                pass
+            self.ai_shop_thinking_job = None
+        self.ai_shop_thinking = False
+        self.ai_shop_thinking_player = None
+        self.ai_shop_buy_pending = False
+        self.stop_ai_hand_cycle(clear=True)
+        self.stop_ai_hand_blink(clear=True)
+        self.stop_shop_sound()
+        self.stop_shop_header_flash()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        if self.shop_bottom_restore and self.compact_player_panels:
+            self.bottom_frame.config(height=self.shop_bottom_restore.get("height", ""))
+            self.bottom_frame.grid_propagate(self.shop_bottom_restore.get("propagate", True))
+            self.table_frame.grid_rowconfigure(1, weight=2, minsize=0)
+            self.shop_bottom_restore = None
+        self.hide_shop_overlay()
+        if not self.game_layout_active:
+            if not self.top_area.winfo_ismapped():
+                self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.hand_frame.config(height=max(self.calculate_hand_display_height(), 44))
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.game_layout_active = True
+        if self.rulebook_visible:
+            self.rulebook_frame.pack(fill="both", expand=True, pady=5)
+        if self.scorecard_visible:
+            self.scorecard_frame.pack(fill="both", expand=True, pady=5)
+        self.refresh_responsive_layout()
+        self.render_hand()
+
+    def on_table_frame_resize(self, _event=None) -> None:
+        if hasattr(self, "center_frame") and self.center_frame.winfo_exists():
+            self.set_center_frame_size()
+        if self.shop_layout_active:
+            self.update_shop_layout_geometry()
+        elif self.game_layout_active and not self.in_shop:
+            self.show_roll_border()
+
+    def update_shop_layout_geometry(self) -> None:
+        if not self.shop_layout_active:
+            return
+        shop_metrics = self.get_shop_layout_metrics()
+        self.table_frame.update_idletasks()
+        total_w = max(1, self.table_frame.winfo_width())
+        total_h = max(1, self.table_frame.winfo_height())
+        bottom_h = self.bottom_frame.winfo_height() if self.compact_player_panels else 0
+        available_h = max(1, total_h - bottom_h)
+        rel_h = max(0.1, min(1.0, available_h / total_h))
+        self.shop_frame.place(
+            relx=0.5,
+            rely=0.0,
+            anchor="n",
+            relwidth=shop_metrics["relwidth"],
+            relheight=rel_h,
+        )
+
+    def enter_dice_bank_layout(self) -> None:
+        self.hide_roll_border()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        self.shop_layout_active = False
+        self.hide_shop_overlay()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        self.bag_view_frame.pack_forget()
+        self.cat_burglar_frame.pack_forget()
+        self.dice_bank_frame.pack(fill="both", expand=True, pady=10)
+
+    def exit_dice_bank_layout(self) -> None:
+        self.dice_bank_frame.pack_forget()
+        if self.dice_bank_return_to_shop:
+            self.show_shop()
+        else:
+            self.show_table_frames()
+            if not self.top_area.winfo_ismapped():
+                self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.show_roll_border()
+            if self.scorecard_visible:
+                self.scorecard_frame.pack(fill="both", expand=True, pady=5)
+
+    def enter_bag_view_layout(self) -> None:
+        self.hide_roll_border()
+        self.top_area.pack_forget()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        self.shop_layout_active = False
+        self.hide_shop_overlay()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        self.dice_bank_frame.pack_forget()
+        self.cat_burglar_frame.pack_forget()
+        self.center_frame.update_idletasks()
+        self.bag_view_frame.pack_forget()
+        self.bag_view_frame.place_forget()
+        self.bag_view_frame.place(
+            relx=0.5,
+            rely=0.02,
+            anchor="n",
+            relwidth=0.96,
+            relheight=0.6,
+        )
+        self.bag_view_frame.lift()
+        self.bag_view_frame.update_idletasks()
+        self.ensure_bag_view_action_space()
+
+    def exit_bag_view_layout(self) -> None:
+        self.bag_view_frame.pack_forget()
+        self.bag_view_frame.place_forget()
+        if self.bag_view_return_to_shop:
+            self.show_shop()
+        else:
+            self.show_table_frames()
+            self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+            self.show_roll_border()
+            if self.rulebook_visible:
+                self.rulebook_frame.pack(fill="both", expand=True, pady=5)
+        if self.scorecard_visible:
+            self.scorecard_frame.pack(fill="both", expand=True, pady=5)
+
+    def enter_cat_burglar_layout(self) -> None:
+        self.hide_roll_border()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        self.shop_layout_active = False
+        self.hide_shop_overlay()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        self.dice_bank_frame.pack_forget()
+        self.bag_view_frame.pack_forget()
+        self.cat_burglar_frame.pack(fill="both", expand=True, pady=10)
+
+    def ensure_bag_view_action_space(self) -> None:
+        self.bag_view_frame.update_idletasks()
+        available = self.bag_view_frame.winfo_height()
+        if available <= 0:
+            return
+        header_h = self.bag_view_header.winfo_height()
+        hint_h = self.bag_view_hint.winfo_height()
+        padding = 24
+        canvas_h = max(120, available - header_h - hint_h - padding)
+        self.bag_view_canvas.config(height=canvas_h)
+
+    def on_root_resize(self, _event=None) -> None:
+        if not self.bag_view_active:
+            return
+        self.bag_view_frame.place_configure(relx=0.5, rely=0.02, anchor="n")
+
+    def exit_cat_burglar_layout(self) -> None:
+        self.cat_burglar_frame.pack_forget()
+        self.show_table_frames()
+        if not self.top_area.winfo_ismapped():
+            self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+        self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.show_roll_border()
+        if self.rulebook_visible:
+            self.rulebook_frame.pack(fill="both", expand=True, pady=5)
+        if self.scorecard_visible:
+            self.scorecard_frame.pack(fill="both", expand=True, pady=5)
+
+    def open_bag_view(
+        self,
+        player: Player,
+        return_to_shop: bool,
+        mode: str,
+        card: Card | None = None,
+        actor: Player | None = None,
+    ) -> None:
+        self.bag_view_active = True
+        self.bag_view_return_to_shop = return_to_shop
+        self.bag_view_mode = mode
+        self.bag_view_actor = actor or player
+        self.bag_view_player = player
+        self.bag_view_card = card
+        self.bag_view_selected = []
+        back_img = self.ui_images.get("back")
+        convert_img = self.ui_images.get("convert")
+        discard_img = self.ui_images.get("discard")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        if mode == "batcat":
+            self.bag_view_title.config(text="Bag View")
+            self.bag_view_select_limit = 2
+            self.bag_view_hint.config(text="Select 2 dice to discard (0/2).")
+            self.bag_view_confirm.config(
+                text="Discard Selected" if not discard_img else "",
+                image=discard_img,
+                command=self.confirm_bag_discard,
+            )
+            if discard_img:
+                self.bag_view_confirm.image = discard_img
+            self.bag_view_confirm.pack(side="left", padx=4)
+            self.bag_view_close.config(text="Cancel", image=back_img)
+            if back_img:
+                self.bag_view_close.image = back_img
+        elif mode == "feral":
+            self.bag_view_title.config(text="Bag View")
+            self.bag_view_select_limit = 1
+            self.bag_view_hint.config(text="Select 1 die to convert (0/1).")
+            self.bag_view_confirm.config(
+                text="Convert Selected" if not convert_img else "",
+                image=convert_img,
+                command=self.confirm_bag_convert,
+            )
+            if convert_img:
+                self.bag_view_confirm.image = convert_img
+            self.bag_view_confirm.pack(side="left", padx=4)
+            self.bag_view_close.config(text="Cancel", image=back_img)
+            if back_img:
+                self.bag_view_close.image = back_img
+        elif mode == "narc":
+            self.bag_view_title.config(text="Narc Cat")
+            self.bag_view_select_limit = 1
+            self.bag_view_hint.config(text="Select 1 purple die to remove (0/1).")
+            self.bag_view_confirm.config(
+                text="Remove Purple" if not discard_img else "",
+                image=discard_img,
+                command=self.confirm_bag_narc,
+            )
+            if discard_img:
+                self.bag_view_confirm.image = discard_img
+            self.bag_view_confirm.pack(side="left", padx=4)
+            self.bag_view_close.config(text="Cancel", image=back_img)
+            if back_img:
+                self.bag_view_close.image = back_img
+        else:
+            self.bag_view_title.config(text="Bag View")
+            self.bag_view_select_limit = 0
+            self.bag_view_hint.config(text="Bag contents.")
+            self.bag_view_confirm.pack_forget()
+            close_img = self.ui_images.get("close") or back_img
+            self.bag_view_close.config(text="Close", image=close_img)
+            if close_img:
+                self.bag_view_close.image = close_img
+            if back_img:
+                self.bag_view_close.image = back_img
+        if mode == "narc":
+            targets = [
+                p
+                for p in self.players
+                if p is not self.bag_view_actor and p.is_ai
+            ]
+            if self.bag_view_target_menu:
+                menu = self.bag_view_target_menu["menu"]
+                menu.delete(0, "end")
+                for target in targets:
+                    menu.add_command(
+                        label=target.name,
+                        command=lambda n=target.name: self.on_bag_view_target_change(n),
+                    )
+            if targets:
+                self.bag_view_target_var.set(targets[0].name)
+                self.bag_view_player = targets[0]
+            if self.bag_view_target_row:
+                self.bag_view_target_row.grid()
+        else:
+            if self.bag_view_target_row:
+                self.bag_view_target_row.grid_remove()
+        self.enter_bag_view_layout()
+        self.render_bag_view(self.bag_view_player or player)
+
+    def close_bag_view(self) -> None:
+        if not self.bag_view_active:
+            return
+        if self.bag_view_mode in ("batcat", "feral", "narc") and self.bag_view_card and self.bag_view_actor:
+            self.bag_view_actor.cat_cards.append(self.bag_view_card)
+            self.update_table_view()
+        self.bag_view_active = False
+        self.bag_view_mode = "view"
+        self.bag_view_player = None
+        self.bag_view_actor = None
+        self.bag_view_card = None
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.exit_bag_view_layout()
+
+    def on_bag_view_target_change(self, name: str) -> None:
+        if not self.bag_view_active or self.bag_view_mode != "narc":
+            return
+        self.bag_view_target_var.set(name)
+        target = next((p for p in self.players if p.name == name), None)
+        if not target:
+            return
+        self.bag_view_player = target
+        self.render_bag_view(target)
+
+    def render_bag_view(self, player: Player) -> None:
+        canvas_w = self.bag_view_canvas.winfo_width()
+        canvas_h = self.bag_view_canvas.winfo_height()
+        if canvas_w <= 1 or canvas_h <= 1:
+            self.root.after(0, lambda: self.render_bag_view(player))
+            return
+        if self.bag_view_mode == "narc":
+            has_purple = player.bag.counts.get("purple", 0) > 0
+            self.safe_config(
+                self.bag_view_confirm,
+                state="normal" if has_purple else "disabled",
+            )
+            if not has_purple:
+                self.bag_view_hint.config(text="Target has no purple dice.")
+        for widget in self.bag_view_content.winfo_children():
+            widget.destroy()
+        self.bag_view_dice_labels = []
+        self.bag_view_selected = []
+        self.bag_view_content.grid_columnconfigure(0, weight=1)
+        colors_to_show = list(BASE_COLORS)
+        if player.bag.counts.get("purple", 0) > 0:
+            colors_to_show.append("purple")
+        base_img = self.dice_images
+        die_sample = next(
+            (img for faces in base_img.values() for img in faces.values() if img),
+            None,
+        )
+        die_w = die_sample.width() if die_sample else 24
+        die_h = die_sample.height() if die_sample else 24
+        pad = 1
+        dice_items: list[str] = []
+        for color in colors_to_show:
+            count = player.bag.counts.get(color, 0)
+            if count <= 0:
+                continue
+            dice_items.extend([color] * count)
+        use_images = base_img
+        row = tk.Frame(self.bag_view_content, bg=self.theme["panel_dark"])
+        row.pack(anchor="center", pady=3, fill="x")
+        dice_container = tk.Frame(row, bg=self.theme["panel_dark"])
+        dice_container.pack(anchor="center")
+        for i, color in enumerate(dice_items):
+            value = random.randint(1, 6)
+            img = use_images.get(color, {}).get(value)
+            if self.bag_view_mode in ("batcat", "feral", "narc"):
+                if self.bag_view_mode == "narc" and color != "purple":
+                    if img:
+                        lbl = tk.Label(dice_container, image=img, bg=self.theme["panel_dark"])
+                        lbl.image = img
+                    else:
+                        lbl = tk.Label(
+                            dice_container,
+                            text=f"{color} {value}",
+                            font=self.theme["body_font"],
+                            bg=self.theme["panel_dark"],
+                            fg=self.theme["muted"],
+                        )
+                else:
+                    var = tk.BooleanVar(value=False)
+                    if img:
+                        lbl = tk.Checkbutton(
+                            dice_container,
+                            image=img,
+                            variable=var,
+                            indicatoron=0,
+                            bg=self.theme["panel_dark"],
+                            activebackground=self.theme["panel_dark"],
+                            selectcolor=self.theme["accent"],
+                            borderwidth=0,
+                        )
+                    else:
+                        lbl = tk.Checkbutton(
+                            dice_container,
+                            text=f"{color} {value}",
+                            variable=var,
+                            indicatoron=0,
+                            bg=self.theme["panel_dark"],
+                            fg=self.theme["text"],
+                            activebackground=self.theme["panel_dark"],
+                            selectcolor=self.theme["accent"],
+                        )
+                    var.trace_add("write", lambda *_args, c=color, v=var: self.on_bag_view_toggle(c, v))
+                    self.bag_view_selected.append((color, var))
+            else:
+                if img:
+                    lbl = tk.Label(dice_container, image=img, bg=self.theme["panel_dark"])
+                else:
+                    lbl = tk.Label(
+                        dice_container,
+                        text=f"{color} {value}",
+                        font=self.theme["body_font"],
+                        bg=self.theme["panel_dark"],
+                        fg=self.theme["text"],
+                    )
+            lbl.grid(row=0, column=i, padx=pad, pady=pad)
+            self.bag_view_dice_labels.append(lbl)
+        self.root.after(0, self.refresh_bag_view_layout)
+
+    def refresh_bag_view_layout(self) -> None:
+        if not self.bag_view_frame.winfo_ismapped():
+            return
+        self.bag_view_content.update_idletasks()
+        self.bag_view_canvas.update_idletasks()
+        self.bag_view_canvas.configure(scrollregion=self.bag_view_canvas.bbox("all"))
+        canvas_w = self.bag_view_canvas.winfo_width()
+        canvas_h = self.bag_view_canvas.winfo_height()
+        content_w = self.bag_view_content.winfo_width()
+        content_h = self.bag_view_content.winfo_height()
+        if canvas_w > 1:
+            window_w = min(content_w, canvas_w)
+            anchor = "center" if self.bag_view_mode in ("batcat", "feral") else "n"
+            self.bag_view_canvas.itemconfigure(
+                self.bag_view_canvas_window, width=window_w, anchor=anchor
+            )
+            x = canvas_w / 2
+            if anchor == "center":
+                y = canvas_h / 2
+            else:
+                y = max(0, (canvas_h - content_h) / 2)
+            self.bag_view_canvas.coords(self.bag_view_canvas_window, x, y)
+        if content_h > canvas_h:
+            self.bag_view_scrollbar.grid_remove()
+        else:
+            self.bag_view_scrollbar.grid_remove()
+
+    def open_cat_burglar(self, player: Player, card: Card) -> None:
+        ai_targets = [
+            p
+            for p in self.players
+            if p is not player and p.is_ai and (p.dog_cards or p.stolen_dog_cards)
+        ]
+        if not ai_targets:
+            self.add_log("No AI dog cards to steal.")
+            return
+        self.cat_burglar_active = True
+        self.cat_burglar_player = player
+        self.cat_burglar_card = card
+        self.cat_burglar_selected = None
+        self.add_log("Cat Burglar active: click an AI dog card to steal it.")
+        self.show_toast("Cat Burglar: select an AI dog card to steal!")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def select_cat_burglar(self, target: Player, card: Card) -> None:
+        self.cat_burglar_selected = (target, card)
+        for btn, t, c in self.cat_burglar_buttons:
+            if t is target and c is card:
+                btn.config(bg=self.theme["accent"], fg="white")
+            else:
+                btn.config(bg=self.theme["panel"], fg=self.theme["text"])
+
+    def confirm_cat_burglar(self) -> None:
+        if not self.cat_burglar_active or not self.cat_burglar_selected:
+            return
+        player = self.cat_burglar_player
+        target, card = self.cat_burglar_selected
+        if player:
+            if card in target.dog_cards:
+                target.dog_cards.remove(card)
+            elif card in target.stolen_dog_cards:
+                target.stolen_dog_cards.remove(card)
+            else:
+                return
+            self.apply_grudge_from_theft(target)
+            player.stolen_dog_cards.append(card)
+            if self.cat_burglar_card in player.cat_cards:
+                player.cat_cards.remove(self.cat_burglar_card)
+            self.add_log(f"{player.name} stole {card.name} from {target.name}.")
+            self.trigger_shadow_dawg(player)
+            if not player.is_ai:
+                self.increment_profile_stat("steals", 1)
+        self.cat_burglar_active = False
+        self.cat_burglar_player = None
+        self.cat_burglar_card = None
+        self.cat_burglar_selected = None
+        if self.compact_player_panels:
+            self.carousel_player_index = 0
+            self.carousel_locked = False
+        self.update_table_view()
+        self.render_cat_actions()
+        self.exit_cat_burglar_layout()
+
+    def confirm_cat_burglar_from_inventory(self, target: Player, card: Card) -> None:
+        if not self.cat_burglar_active or not self.cat_burglar_player:
+            return
+        player = self.cat_burglar_player
+        if target is player or not target.is_ai:
+            return
+        if card in target.dog_cards:
+            target.dog_cards.remove(card)
+        elif card in target.stolen_dog_cards:
+            target.stolen_dog_cards.remove(card)
+        else:
+            return
+        self.apply_grudge_from_theft(target)
+        player.stolen_dog_cards.append(card)
+        if self.cat_burglar_card in player.cat_cards:
+            player.cat_cards.remove(self.cat_burglar_card)
+        self.add_log(f"{player.name} stole {card.name} from {target.name}.")
+        self.trigger_shadow_dawg(player)
+        if not player.is_ai:
+            self.increment_profile_stat("steals", 1)
+        self.cat_burglar_active = False
+        self.cat_burglar_player = None
+        self.cat_burglar_card = None
+        self.cat_burglar_selected = None
+        if self.compact_player_panels:
+            self.carousel_player_index = 0
+            self.carousel_locked = False
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def cancel_cat_burglar(self) -> None:
+        if not self.cat_burglar_active:
+            return
+        self.cat_burglar_active = False
+        self.cat_burglar_player = None
+        self.cat_burglar_card = None
+        self.cat_burglar_selected = None
+        self.render_cat_actions()
+        self.exit_cat_burglar_layout()
+
+    def open_territorial_select(self, player: Player, card: Card, targets: list[Player]) -> None:
+        self.cat_burglar_title.config(text="Territorial Cat")
+        self.cat_burglar_hint.config(
+            text="Select a dog card to block next round."
+        )
+        self.cat_burglar_confirm.config(text="Block Selected", command=self.confirm_territorial)
+        self.cat_burglar_cancel.config(text="Cancel", command=self.cancel_territorial)
+        self.territorial_active = True
+        self.territorial_player = player
+        self.territorial_card = card
+        self.territorial_selected = None
+        for widget in self.cat_burglar_list.winfo_children():
+            widget.destroy()
+        self.territorial_buttons = []
+        for target in targets:
+            tk.Label(
+                self.cat_burglar_list,
+                text=f"{target.name}'s dog cards:",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            ).pack(anchor="center", pady=(2, 0))
+            for dog in target.dog_cards + target.stolen_dog_cards:
+                btn = tk.Button(
+                    self.cat_burglar_list,
+                    text=f"{dog.name} - {dog.description}",
+                    command=lambda p=target, c=dog: self.select_territorial(p, c),
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel"],
+                    fg=self.theme["text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    anchor="w",
+                    justify="left",
+                    wraplength=600,
+                )
+                btn.pack(anchor="center", pady=1)
+                self.territorial_buttons.append((btn, target, dog))
+        self.enter_cat_burglar_layout()
+
+    def select_territorial(self, target: Player, card: Card) -> None:
+        self.territorial_selected = (target, card)
+        for btn, t, c in self.territorial_buttons:
+            if t is target and c is card:
+                btn.config(bg=self.theme["accent"], fg="white")
+            else:
+                btn.config(bg=self.theme["panel"], fg=self.theme["text"])
+
+    def confirm_territorial(self) -> None:
+        if not self.territorial_active or not self.territorial_selected:
+            return
+        player = self.territorial_player
+        target, card = self.territorial_selected
+        if player and self.game:
+            target.blocked_dog_card = card
+            target.blocked_dog_round = self.game.round_num + 1
+            target.blocked_dog_active = False
+            self.add_log(
+                f"{player.name} used Territorial Cat on {target.name}'s {card.name} (next round)."
+            )
+            self.show_toast("Dog disabled for next round!")
+            self.trigger_shadow_dawg(player)
+        self.territorial_active = False
+        self.territorial_player = None
+        self.territorial_card = None
+        self.territorial_selected = None
+        self.update_table_view()
+        self.render_cat_actions()
+        self.exit_cat_burglar_layout()
+
+    def cancel_territorial(self) -> None:
+        if not self.territorial_active:
+            return
+        if (
+            self.territorial_player
+            and self.territorial_card
+            and self.territorial_card not in self.territorial_player.cat_cards
+        ):
+            self.territorial_player.cat_cards.append(self.territorial_card)
+        self.territorial_active = False
+        self.territorial_player = None
+        self.territorial_card = None
+        self.territorial_selected = None
+        self.render_cat_actions()
+        self.exit_cat_burglar_layout()
+
+    def confirm_territorial_from_inventory(self, target: Player, card: Card) -> None:
+        if not self.territorial_active or not self.territorial_player or not self.game:
+            return
+        if target is self.territorial_player:
+            return
+        if card not in target.dog_cards and card not in target.stolen_dog_cards:
+            return
+        if self.territorial_selected == (target, card):
+            self.cancel_territorial_selection()
+            return
+        if self.territorial_selected:
+            prev_target, prev_card = self.territorial_selected
+            if prev_target.blocked_dog_card is prev_card:
+                prev_target.blocked_dog_card = None
+                prev_target.blocked_dog_round = 0
+                prev_target.blocked_dog_active = False
+        target.blocked_dog_card = card
+        target.blocked_dog_round = self.game.round_num + 1
+        target.blocked_dog_active = False
+        self.territorial_selected = (target, card)
+        if self.territorial_card in self.territorial_player.cat_cards:
+            self.territorial_player.cat_cards.remove(self.territorial_card)
+        self.add_log(
+            f"{self.territorial_player.name} used Territorial Cat on {target.name}'s {card.name} (next round)."
+        )
+        self.show_toast("Dog disabled for next round!")
+        self.trigger_shadow_dawg(self.territorial_player)
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def cancel_territorial_selection(self) -> None:
+        if not self.territorial_active:
+            return
+        if self.territorial_selected:
+            target, card = self.territorial_selected
+            if target.blocked_dog_card is card:
+                target.blocked_dog_card = None
+                target.blocked_dog_round = 0
+                target.blocked_dog_active = False
+        if (
+            self.territorial_player
+            and self.territorial_card
+            and self.territorial_card not in self.territorial_player.cat_cards
+        ):
+            self.territorial_player.cat_cards.append(self.territorial_card)
+        self.territorial_active = False
+        self.territorial_player = None
+        self.territorial_card = None
+        self.territorial_selected = None
+        self.add_log("Territorial Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_dogs_best_friend_from_inventory(self, target: Player, card: Card) -> bool:
+        if not self.dogs_best_friend_active or not self.dogs_best_friend_player:
+            return False
+        player = self.dogs_best_friend_player
+        owned_dogs = player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards
+        if card not in owned_dogs:
+            match = next((c for c in owned_dogs if c.name == card.name), None)
+            if match:
+                card = match
+            else:
+                self.show_toast("Select a dog from your inventory.")
+                return False
+        copied = Card(card.name, card.kind, card.cost, dict(card.effect), card.description)
+        player.temp_dog_cards.append(copied)
+        if self.dogs_best_friend_card in player.cat_cards:
+            player.cat_cards.remove(self.dogs_best_friend_card)
+        if self.game and self.dogs_best_friend_card:
+            self.game.cat_deck.add(self.dogs_best_friend_card)
+        self.add_log(
+            f"{player.name} used Dogs Best Friend: copied {card.name} for this round."
+        )
+        self.show_toast(f"Duplicated {card.name} for this round!")
+        self.trigger_shadow_dawg(player)
+        self.dogs_best_friend_active = False
+        self.dogs_best_friend_player = None
+        self.dogs_best_friend_card = None
+        self.hide_dogs_best_friend_picker()
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+        return True
+
+    def cancel_dogs_best_friend(self) -> None:
+        if not self.dogs_best_friend_active:
+            return
+        self.dogs_best_friend_active = False
+        self.dogs_best_friend_player = None
+        self.dogs_best_friend_card = None
+        self.add_log("Dogs Best Friend selection canceled.")
+        self.hide_dogs_best_friend_picker()
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def show_dogs_best_friend_picker(self, player: Player) -> None:
+        if self.dogs_best_friend_picker and self.dogs_best_friend_picker.winfo_exists():
+            self.dogs_best_friend_picker.destroy()
+        picker = tk.Frame(
+            self.root,
+            bg=self.theme["panel_dark"],
+            highlightthickness=2,
+            highlightbackground=self.theme["accent"],
+        )
+        tk.Label(
+            picker,
+            text="Select a dog to duplicate",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(padx=12, pady=(10, 6))
+        cards_frame = tk.Frame(picker, bg=self.theme["panel_dark"])
+        cards_frame.pack(padx=10, pady=(0, 8))
+        dogs = player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards
+        if not dogs:
+            tk.Label(
+                cards_frame,
+                text="No dog cards to copy.",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["muted"],
+            ).pack()
+        else:
+            for dog in dogs:
+                img = self.get_card_image(dog)
+                if img:
+                    btn = tk.Button(
+                        cards_frame,
+                        image=img,
+                        command=lambda c=dog: self.confirm_dogs_best_friend_from_inventory(player, c),
+                        bg=self.theme["panel_dark"],
+                        activebackground=self.theme["panel_dark"],
+                        relief="flat",
+                        borderwidth=0,
+                    )
+                    btn.image = img
+                else:
+                    btn = tk.Button(
+                        cards_frame,
+                        text=dog.name,
+                        command=lambda c=dog: self.confirm_dogs_best_friend_from_inventory(player, c),
+                        font=self.theme["body_font"],
+                        bg=self.theme["btn"],
+                        fg=self.theme["btn_text"],
+                        activebackground=self.theme["btn_active"],
+                        relief="flat",
+                        padx=6,
+                        pady=4,
+                    )
+                btn.pack(side="left", padx=4)
+                btn.card_ref = dog
+                btn.card_owner = player
+                btn.card_name = dog.name
+                btn.is_card_widget = True
+                self.attach_card_tooltip(btn, dog)
+        cancel_img = self.ui_images.get("cancel")
+        cancel_btn = tk.Button(
+            picker,
+            text="Cancel" if not cancel_img else "",
+            image=cancel_img,
+            command=self.cancel_dogs_best_friend,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if cancel_img:
+            cancel_btn.image = cancel_img
+        cancel_btn.pack(pady=(0, 10))
+        picker.place(relx=0.5, rely=0.5, anchor="center")
+        picker.lift()
+        self.dogs_best_friend_picker = picker
+
+    def hide_dogs_best_friend_picker(self) -> None:
+        if self.dogs_best_friend_picker and self.dogs_best_friend_picker.winfo_exists():
+            self.dogs_best_friend_picker.destroy()
+        self.dogs_best_friend_picker = None
+
+    def confirm_raccoon_target(self, target: Player) -> None:
+        if not self.raccoon_active or not self.raccoon_player or not self.raccoon_card:
+            return
+        if target is self.raccoon_player:
+            return
+        if target.kibbles <= 0:
+            self.add_log("Target has no kibbles to steal.")
+            return
+        thief = self.raccoon_player
+        stolen = min(2, int(target.kibbles))
+        target.kibbles -= stolen
+        thief.kibbles += stolen
+        self.apply_grudge_from_theft(target)
+        thief.cat_cards.remove(self.raccoon_card)
+        if self.game:
+            self.game.cat_deck.add(self.raccoon_card)
+        self.add_log(
+            f"{thief.name} used Raccoon Cat: stole {stolen} kibble from {target.name}."
+        )
+        self.show_score_toast(
+            f"{thief.name} stole {stolen} kibble from {target.name}!",
+            duration_ms=2200,
+            highlight=True,
+        )
+        self.trigger_shadow_dawg(thief)
+        self.raccoon_active = False
+        self.raccoon_player = None
+        self.raccoon_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+        if self.in_shop:
+            self.hide_shop_overlay()
+            self.show_shop()
+            self.update_table_view()
+            self.update_status()
+
+    def cancel_raccoon(self) -> None:
+        if not self.raccoon_active:
+            return
+        self.raccoon_active = False
+        self.raccoon_player = None
+        self.raccoon_card = None
+        self.add_log("Raccoon Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def cancel_focus_selection(self) -> None:
+        if not self.focus_selecting:
+            return
+        self.focus_selecting = False
+        self.focus_pending_card = None
+        self.focus_pending_player = None
+        self.add_log("Focus Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_greedy_target(self, target: Player) -> None:
+        if not self.greedy_active or not self.greedy_player or not self.greedy_card:
+            return
+        if target is self.greedy_player:
+            self.show_toast("Select an opponent.")
+            return
+        game = self.game
+        if not game:
+            return
+        next_round = game.round_num + 1
+        target.pending_roll_penalty += 1
+        target.pending_roll_penalty_round = next_round
+        if self.greedy_card in self.greedy_player.cat_cards:
+            self.greedy_player.cat_cards.remove(self.greedy_card)
+        if self.game and self.greedy_card:
+            self.game.cat_deck.add(self.greedy_card)
+        self.add_log(
+            f"Greedy Cat used: {target.name} will roll 1 fewer die next round."
+        )
+        self.show_toast(f"{target.name} rolls 1 fewer die next round!")
+        if self.greedy_player:
+            self.trigger_shadow_dawg(self.greedy_player)
+        self.greedy_active = False
+        self.greedy_player = None
+        self.greedy_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_greedy_selection(self) -> None:
+        if not self.greedy_active:
+            return
+        self.greedy_active = False
+        self.greedy_player = None
+        self.greedy_card = None
+        self.add_log("Greedy Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_squirrel_target(self, target: Player) -> None:
+        if not self.squirrel_active or not self.squirrel_player or not self.squirrel_card:
+            return
+        if target is self.squirrel_player:
+            self.show_toast("Select an opponent.")
+            return
+        colors = [random.choice(BASE_COLORS) for _ in range(4)]
+        for color in colors:
+            target.bag.add(color, 1)
+        if self.squirrel_card in self.squirrel_player.cat_cards:
+            self.squirrel_player.cat_cards.remove(self.squirrel_card)
+        if self.game and self.squirrel_card:
+            self.game.cat_deck.add(self.squirrel_card)
+        self.add_log(
+            f"Squirrel Cat used: added 4 random dice to {target.name}'s bag."
+        )
+        self.show_toast(
+            f"{self.squirrel_player.name} put 4 random dice into {target.name}'s bag!"
+        )
+        if self.squirrel_player:
+            self.trigger_shadow_dawg(self.squirrel_player)
+        self.squirrel_active = False
+        self.squirrel_player = None
+        self.squirrel_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_squirrel_selection(self) -> None:
+        if not self.squirrel_active:
+            return
+        self.squirrel_active = False
+        self.squirrel_player = None
+        self.squirrel_card = None
+        self.add_log("Squirrel Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def apply_schrodinger_at_scoring(self, player: Player) -> None:
+        game = self.game
+        if not game or self.schrodinger_pending is not player:
+            return
+        if not game.current_hand:
+            self.schrodinger_pending = None
+            return
+        if getattr(player, "rerolls_blocked", False):
+            self.schrodinger_pending = None
+            return
+        original_hand = [Die(die.color, die.value) for die in game.current_hand]
+        original_score = best_score(
+            original_hand,
+            player,
+            self.get_color_overrides(player),
+            self.get_value_wild_ids(original_hand, player),
+        )
+        indices = sorted(self.get_scoring_indices(game.current_hand, player))
+        if not indices:
+            indices = list(range(len(game.current_hand)))
+        self.schrodinger_resolution = {
+            "player": player,
+            "hand": original_hand,
+            "score": original_score,
+            "indices": indices,
+        }
+        self.schrodinger_pending = None
+        for idx in indices:
+            die = game.current_hand[idx]
+            game.current_hand[idx] = Die(die.color, random.randint(1, 6))
+        self.add_log("Shrodinger's Cat used: rerolling your scoring hand.")
+        self.show_toast("Shrodinger's Cat: rerolling hand!")
+        self.start_roll_animation(
+            indices=indices,
+            on_finish=self.finish_schrodinger_reroll,
+        )
+
+    def finish_schrodinger_reroll(self) -> None:
+        game = self.game
+        if not game or not self.schrodinger_resolution:
+            return
+        pending = self.schrodinger_resolution
+        self.schrodinger_resolution = None
+        player = pending.get("player")
+        if not player:
+            return
+        original_hand = pending.get("hand", [])
+        original_score = pending.get("score")
+        new_hand = [Die(die.color, die.value) for die in game.current_hand]
+        new_score = best_score(
+            new_hand,
+            player,
+            self.get_color_overrides(player),
+            self.get_value_wild_ids(new_hand, player),
+        )
+        keep_new = False
+        if original_score is None:
+            keep_new = True
+        else:
+            keep_new = new_score.total >= original_score.total
+        if keep_new:
+            delta = new_score.total - (original_score.total if original_score else 0)
+            self.show_toast(f"Shrodinger's Cat: reroll +{int(delta)} points!")
+            self.add_log("Shrodinger's Cat kept the reroll.")
+        else:
+            game.current_hand = [Die(die.color, die.value) for die in original_hand]
+            self.show_toast("Shrodinger's Cat: kept original hand.")
+            self.add_log("Shrodinger's Cat kept the original hand.")
+        if player:
+            self._complete_scoring(player)
+
+    def _complete_scoring(self, player: Player) -> None:
+        game = self.game
+        if not game:
+            return
+        result = game.finish_turn(player, self.get_color_overrides(player))
+        if getattr(player, "starlight_round", 0) == game.round_num:
+            player.starlight_round = 0
+        grudge_bonus = getattr(player, "pending_grudge_bonus", 0)
+        if grudge_bonus:
+            result.extra_points += grudge_bonus
+            player.pending_grudge_bonus = 0
+        self.scores_this_round.append((player, result))
+        player.total_score += result.total
+        if not player.is_ai:
+            self.update_profile_after_turn(player, result)
+        bonus = self.compute_bonus_breakdown(player, result)
+        if grudge_bonus:
+            bonus["Grudge Dawg"] = bonus.get("Grudge Dawg", 0) + grudge_bonus
+        bonus_list = self.build_bonus_list(player, bonus)
+        if bonus:
+            store = self.bonus_points_by_player.setdefault(player.name, {})
+            for name, points in bonus.items():
+                store[name] = store.get(name, 0) + points
+        base_points = self.base_points_for_hand(result.name)
+        hand_mods = max(0, result.score - base_points)
+        entry = self.ensure_round_entry(game.round_num)
+        entry["scores"].append(
+            {
+                "player": player.name,
+                "total": result.total,
+                "name": result.name,
+                "bonus": result.color_bonus,
+                "base": base_points,
+                "color_bonus": result.color_bonus,
+                "hand_mods": hand_mods,
+                "extra_points": result.extra_points,
+                "bonuses": bonus_list,
+            }
+        )
+        self.update_scorecard()
+        log_lines = [
+            f"{player.name} scored {result.total} ({result.name})"
+            + (" + color bonus" if result.color_bonus else ""),
+        ]
+        detail_parts = [f"{result.name} {base_points}"]
+        if bonus_list:
+            detail_parts.append(f"Mods {self.format_bonus_list(bonus_list)}")
+        elif hand_mods:
+            detail_parts.append(f"Mods +{hand_mods}")
+        if result.color_bonus:
+            detail_parts.append(f"Color +{result.color_bonus}")
+        if result.extra_points:
+            detail_parts.append(f"Extra +{result.extra_points}")
+        if detail_parts:
+            log_lines.append("  " + " | ".join(detail_parts))
+        if bonus_list:
+            log_lines.append(f"  Card bonuses: {self.format_bonus_list(bonus_list)}")
+        self.add_log("\n".join(log_lines))
+
+        def advance_turn() -> None:
+            if len(self.scores_this_round) >= len(self.players):
+                self.add_log("All players scored. Entering shop phase.")
+                self.finish_round()
+                return
+            game.turn_index = self.next_clockwise_index(game.turn_index)
+            self._start_turn()
+
+        if player.is_ai:
+            toast_ms = 2200
+            self.show_score_toast(
+                f"{player.name} scores {int(result.total)} points for {result.name}!",
+                duration_ms=toast_ms,
+                highlight=True,
+                dismiss_on_click=True,
+            )
+            self.root.after(toast_ms, advance_turn)
+            return
+        advance_turn()
+
+    def confirm_pummeling_target(self, target: Player) -> None:
+        if not self.pummeling_active or not self.pummeling_player or not self.pummeling_card:
+            return
+        if target is self.pummeling_player:
+            self.show_toast("Select an opponent.")
+            return
+        game = self.game
+        if not game:
+            return
+        next_round = game.round_num + 1
+        target.pending_reroll_block = True
+        target.pending_reroll_block_round = next_round
+        if self.pummeling_card in self.pummeling_player.cat_cards:
+            self.pummeling_player.cat_cards.remove(self.pummeling_card)
+        if self.game and self.pummeling_card:
+            self.game.cat_deck.add(self.pummeling_card)
+        self.add_log(
+            f"Pummeling Puma used: {target.name}'s rerolls blocked next round."
+        )
+        self.show_toast(f"Pummeling Puma used on {target.name}!")
+        self.show_toast(f"{target.name} cannot reroll next round!")
+        if self.pummeling_player:
+            self.trigger_shadow_dawg(self.pummeling_player)
+        self.pummeling_active = False
+        self.pummeling_player = None
+        self.pummeling_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_pummeling_selection(self) -> None:
+        if not self.pummeling_active:
+            return
+        self.pummeling_active = False
+        self.pummeling_player = None
+        self.pummeling_card = None
+        self.add_log("Pummeling Puma selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_void_cat_from_inventory(self, target: Player, card: Card) -> None:
+        if not self.void_cat_active or not self.void_cat_player or not self.void_cat_card:
+            return
+        player = self.void_cat_player
+        if target is player:
+            return
+        if card not in target.cat_cards:
+            return
+        target.cat_cards.remove(card)
+        player.cat_cards.append(card)
+        self.apply_grudge_from_theft(target)
+        if self.void_cat_card in player.cat_cards:
+            player.cat_cards.remove(self.void_cat_card)
+        self.add_log(f"{player.name} stole {card.name} from {target.name}.")
+        self.show_toast(f"Stole {card.name} from {target.name}!")
+        self.trigger_shadow_dawg(player)
+        self.void_cat_active = False
+        self.void_cat_player = None
+        self.void_cat_card = None
+        if self.compact_player_panels:
+            self.carousel_player_index = 0
+            self.carousel_locked = False
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_void_cat(self) -> None:
+        if not self.void_cat_active:
+            return
+        self.void_cat_active = False
+        self.void_cat_player = None
+        self.void_cat_card = None
+        self.add_log("Void Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_thief_night_from_inventory(self, target: Player, card: Card) -> None:
+        if not self.thief_night_active or not self.thief_night_player or not self.thief_night_card:
+            return
+        player = self.thief_night_player
+        if target is player:
+            return
+        stolen_from = False
+        if card in target.cat_cards:
+            target.cat_cards.remove(card)
+            player.cat_cards.append(card)
+            stolen_from = True
+        elif card in target.dog_cards:
+            target.dog_cards.remove(card)
+            player.stolen_dog_cards.append(card)
+            stolen_from = True
+        elif card in target.stolen_dog_cards:
+            target.stolen_dog_cards.remove(card)
+            player.stolen_dog_cards.append(card)
+            stolen_from = True
+        if not stolen_from:
+            return
+        self.apply_grudge_from_theft(target)
+        if self.thief_night_card in player.cat_cards:
+            player.cat_cards.remove(self.thief_night_card)
+        if self.profile_data is not None:
+            self.profile_data["banked_kibbles"] = int(self.profile_data.get("banked_kibbles", 0)) + 3
+            self.save_profile()
+        self.add_log(f"{player.name} stole {card.name} from {target.name} (Thief in the Night).")
+        self.show_toast(f"Stole {card.name} from {target.name}!")
+        self.show_bank_toast(f"{player.name} banked 3 kibbles!")
+        self.trigger_shadow_dawg(player)
+        self.thief_night_active = False
+        self.thief_night_player = None
+        self.thief_night_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_thief_night(self) -> None:
+        if not self.thief_night_active:
+            return
+        self.thief_night_active = False
+        self.thief_night_player = None
+        self.thief_night_card = None
+        self.add_log("Thief in the Night selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def confirm_lioncut_from_inventory(self, target: Player, card: Card) -> None:
+        if not self.lioncut_active or not self.lioncut_player or not self.lioncut_card:
+            return
+        player = self.lioncut_player
+        if target is not player:
+            return
+        if card not in player.dog_cards:
+            self.show_toast("Select a dog from your inventory.")
+            return
+        player.dog_cards.remove(card)
+        player.stolen_dog_cards.append(card)
+        if self.lioncut_card in player.cat_cards:
+            player.cat_cards.remove(self.lioncut_card)
+        self.add_log(f"{player.name} used Lion Cut Cat: moved {card.name} to stolen dogs.")
+        self.show_toast(f"Moved {card.name} to stolen dogs!")
+        self.trigger_shadow_dawg(player)
+        self.lioncut_active = False
+        self.lioncut_player = None
+        self.lioncut_card = None
+        self.update_table_view()
+        self.update_status()
+        self.render_cat_actions()
+
+    def cancel_lioncut(self) -> None:
+        if not self.lioncut_active:
+            return
+        self.lioncut_active = False
+        self.lioncut_player = None
+        self.lioncut_card = None
+        self.add_log("Lion Cut Cat selection canceled.")
+        self.update_table_view()
+        self.render_cat_actions()
+
+    def apply_focus_to_die(self, index: int) -> None:
+        game = self.game
+        if not game or index >= len(game.current_hand):
+            return
+        player = self.focus_pending_player
+        if not player:
+            player = self.players[game.turn_index] if self.players else None
+        if not player or not player.objective_color:
+            self.add_log("Focus Cat requires an objective color.")
+            self.cancel_focus_selection()
+            return
+        die = game.current_hand[index]
+        player.focus_overrides[id(die)] = player.objective_color
+        if self.focus_pending_card and self.focus_pending_card in player.cat_cards:
+            player.cat_cards.remove(self.focus_pending_card)
+        if self.game and self.focus_pending_card:
+            self.game.cat_deck.add(self.focus_pending_card)
+        self.focus_selecting = False
+        self.focus_pending_card = None
+        self.focus_pending_player = None
+        for var in self.dice_vars:
+            var.set(False)
+        self.add_log("Focus Cat used: one die counts as your objective color this round.")
+        self.show_toast("Focus Cat applied!")
+        if self.hand_revealed:
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+        self.update_table_view()
+        self.render_cat_actions()
+        self.render_hand()
+        self.update_status()
+
+    def on_bag_view_toggle(self, color: str, var: tk.BooleanVar) -> None:
+        if self.bag_view_mode not in ("batcat", "feral", "narc"):
+            return
+        selected = sum(1 for _, v in self.bag_view_selected if v.get())
+        if selected > self.bag_view_select_limit:
+            var.set(False)
+            selected = sum(1 for _, v in self.bag_view_selected if v.get())
+        if self.bag_view_mode == "batcat":
+            self.bag_view_hint.config(text=f"Select up to 2 dice to discard ({selected}/2).")
+        elif self.bag_view_mode == "feral":
+            self.bag_view_hint.config(text=f"Select 1 die to convert ({selected}/1).")
+        else:
+            self.bag_view_hint.config(text=f"Select 1 purple die to remove ({selected}/1).")
+
+    def confirm_bag_discard(self) -> None:
+        if self.bag_view_mode != "batcat" or not self.bag_view_player:
+            return
+        selected_colors = [c for c, v in self.bag_view_selected if v.get()]
+        if not selected_colors or len(selected_colors) > 2:
+            self.add_log("Select 1 or 2 dice to discard.")
+            return
+        for color in selected_colors:
+            if self.bag_view_player.bag.counts.get(color, 0) > 0:
+                self.bag_view_player.bag.counts[color] -= 1
+        self.add_log(f"Bat Cat used: {len(selected_colors)} die discarded.")
+        self.trigger_shadow_dawg(self.bag_view_player)
+        self.bag_view_active = False
+        self.bag_view_mode = "view"
+        self.bag_view_player = None
+        self.bag_view_card = None
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.update_table_view()
+        self.update_status()
+        self.exit_bag_view_layout()
+
+    def confirm_bag_convert(self) -> None:
+        if self.bag_view_mode != "feral" or not self.bag_view_player:
+            return
+        selected_colors = [c for c, v in self.bag_view_selected if v.get()]
+        if len(selected_colors) != 1:
+            self.add_log("Select exactly 1 die to convert.")
+            return
+        color = selected_colors[0]
+        if self.bag_view_player.bag.counts.get(color, 0) > 0:
+            self.bag_view_player.bag.counts[color] -= 1
+            self.bag_view_player.bag.counts["purple"] += 1
+        self.add_log("Feral Cat used: 1 die converted to purple.")
+        self.trigger_shadow_dawg(self.bag_view_player)
+        self.bag_view_hint.config(text="Converted to purple!")
+        self.bag_view_mode = "view"
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.bag_view_confirm.pack_forget()
+        back_img = self.ui_images.get("back")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        close_img = self.ui_images.get("close") or back_img
+        self.bag_view_close.config(text="Close", image=close_img)
+        if close_img:
+            self.bag_view_close.image = close_img
+        if back_img:
+            self.bag_view_close.image = back_img
+        self.render_bag_view(self.bag_view_player)
+        self.bag_view_frame.update_idletasks()
+        self.root.after(700, self.finish_bag_convert)
+
+    def confirm_bag_narc(self) -> None:
+        if self.bag_view_mode != "narc" or not self.bag_view_player or not self.bag_view_actor:
+            return
+        selected_colors = [c for c, v in self.bag_view_selected if v.get()]
+        if len(selected_colors) != 1 or selected_colors[0] != "purple":
+            self.add_log("Select exactly 1 purple die to remove.")
+            return
+        if self.bag_view_player.bag.counts.get("purple", 0) <= 0:
+            self.add_log("Target has no purple dice to remove.")
+            return
+        self.bag_view_player.bag.counts["purple"] -= 1
+        self.apply_grudge_from_theft(self.bag_view_player)
+        if self.bag_view_card and self.game:
+            self.game.cat_deck.add(self.bag_view_card)
+        if self.bag_view_card and self.bag_view_card in self.bag_view_actor.cat_cards:
+            self.bag_view_actor.cat_cards.remove(self.bag_view_card)
+        self.add_log(
+            f"Narc Cat used: removed 1 purple die from {self.bag_view_player.name}."
+        )
+        self.show_toast(f"Removed a purple die from {self.bag_view_player.name}!")
+        if self.bag_view_actor:
+            self.trigger_shadow_dawg(self.bag_view_actor)
+        self.bag_view_active = False
+        self.bag_view_mode = "view"
+        self.bag_view_player = None
+        self.bag_view_actor = None
+        self.bag_view_card = None
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.update_table_view()
+        self.update_status()
+        self.exit_bag_view_layout()
+
+    def finish_bag_convert(self) -> None:
+        if not self.bag_view_active:
+            return
+        self.bag_view_active = False
+        self.bag_view_mode = "view"
+        self.bag_view_player = None
+        self.bag_view_card = None
+        self.bag_view_selected = []
+        self.bag_view_select_limit = 0
+        self.update_table_view()
+        self.update_status()
+        self.exit_bag_view_layout()
+
+    def _card_button(
+        self,
+        frame: tk.Frame,
+        player: Player,
+        card: Card,
+        index: int,
+        kind: str,
+        horizontal: bool = False,
+        animate: bool = False,
+        grid: tuple[int, int] | None = None,
+    ) -> tk.Label | None:
+        game = self.game
+        if not game:
+            return
+        bg = self.theme["shop_bg"] if self.in_shop else self.theme["panel_dark"]
+        shop_metrics = self.get_shop_layout_metrics() if self.in_shop else {
+            "card_padx": 6,
+            "card_pady": 4,
+        }
+        container = tk.Frame(frame, bg=bg)
+        def on_buy(_event=None) -> None:
+            self.buy_card(player, card, index, kind)
+        if grid is not None:
+            row, col = grid
+            container.grid(
+                row=row,
+                column=col,
+                padx=shop_metrics["card_padx"],
+                pady=shop_metrics["card_pady"],
+                sticky="w",
+            )
+        elif horizontal:
+            container.pack(side="left", padx=shop_metrics["card_padx"], pady=shop_metrics["card_pady"])
+        else:
+            container.pack(anchor="w", pady=2)
+        stack = tk.Frame(container, bg=bg)
+        stack.pack(side="left")
+        img = self.get_card_image(card)
+        btn = None
+        card_widget = None
+        canvas_image_id = None
+        if img:
+            if animate:
+                canvas = tk.Canvas(
+                    stack,
+                    width=img.width(),
+                    height=img.height(),
+                    bg=bg,
+                    highlightthickness=0,
+                )
+                canvas.pack(side="top")
+                card_widget = canvas
+                image_id = canvas.create_image(
+                    img.width() // 2, img.height() // 2, image=img
+                )
+                canvas_image_id = image_id
+                cover = canvas.create_rectangle(
+                    0,
+                    0,
+                    img.width(),
+                    img.height(),
+                    fill=bg,
+                    outline="",
+                )
+
+                def step(i: int) -> None:
+                    total = 8
+                    if i > total:
+                        canvas.delete(cover)
+                        return
+                    width = img.width()
+                    height = img.height()
+                    right = int(width * (i / total))
+                    canvas.coords(cover, right, 0, width, height)
+                    canvas.after(35, lambda: step(i + 1))
+
+                self.play_sound(self.flip_sound)
+                canvas.after(40, lambda: step(0))
+                canvas.bind(
+                    "<Button-1>", on_buy
+                )
+                self.attach_card_tooltip(canvas, card)
+            else:
+                btn = tk.Button(
+                    stack,
+                    image=img,
+                    command=on_buy,
+                    bg=bg,
+                    activebackground=bg,
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+                card_widget = btn
+        else:
+            btn = tk.Button(
+                stack,
+                text=card.name,
+                command=on_buy,
+                font=self.theme["body_font"],
+                bg=self.theme["panel"] if not self.in_shop else bg,
+                fg=self.theme["text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                anchor="w",
+            )
+            card_widget = btn
+        if btn:
+            btn.pack(side="top")
+            self.attach_card_tooltip(btn, card)
+            btn.bind("<Button-1>", on_buy, add="+")
+        if self.in_shop and card_widget:
+            self.shop_card_widgets.setdefault(kind, {})[index] = {
+                "widget": card_widget,
+                "canvas_id": canvas_image_id,
+                "base_image": img,
+                "overlay_image": None,
+            }
+        self.attach_card_tooltip(container, card)
+        container.bind("<Button-1>", on_buy, add="+")
+        if kind == "dog" and player.free_dog_claims > 0:
+            free_label = tk.Label(
+                container,
+                text="FREE",
+                font=self.theme["body_font"],
+                bg=bg,
+                fg=self.theme["accent"],
+            )
+            free_label.pack(side="left", padx=6)
+            self.attach_card_tooltip(free_label, card)
+            free_label.bind("<Button-1>", on_buy)
+        return None
+
+    def render_shop_cat_actions(self, player: Player) -> list:
+        allowed = [
+            c
+            for c in player.cat_cards
+            if c.name
+            in (
+                "Stray Cat",
+                "Present Cat",
+                "Bat Cat",
+                "Tolerant Cat",
+                "Regal Cat",
+                "Cat Tackle",
+                "Raccoon Cat",
+            )
+        ]
+        if not allowed:
+            return []
+        return allowed
+
+    def show_shop_overlay(self, cards: list) -> None:
+        for widget in self.shop_overlay.winfo_children():
+            widget.destroy()
+        self.shop_overlay.config(bg=self.theme["shop_bg"], bd=2, relief="groove")
+        self.shop_overlay.place(
+            in_=self.shop_backdrop, relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0
+        )
+        self.shop_overlay_visible = True
+        self.shop_overlay.lift()
+        panel = tk.Frame(self.shop_overlay, bg=self.theme["shop_bg"], bd=2, relief="groove")
+        panel.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.9, relheight=0.6)
+        header = tk.Frame(panel, bg=self.theme["shop_bg"])
+        header.pack(fill="x", pady=(6, 2))
+        tk.Label(
+            header,
+            text="Use Cat Cards (Shop)",
+            font=self.theme["subheader_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(side="left", padx=10)
+        close_img = self.ui_images.get("close")
+        close_btn = tk.Button(
+            header,
+            text="Close" if not close_img else "",
+            image=close_img,
+            command=self.hide_shop_overlay,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=8,
+            pady=2,
+        )
+        if close_img:
+            close_btn.image = close_img
+        close_btn.pack(side="right", padx=10)
+        body = tk.Frame(panel, bg=self.theme["shop_bg"])
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+        for card in cards:
+            container = tk.Frame(body, bg=self.theme["shop_bg"])
+            container.pack(anchor="w", pady=2)
+            img = self.get_card_image(card)
+            if img:
+                btn = tk.Button(
+                    container,
+                    image=img,
+                    command=lambda c=card: self.use_cat_card(c),
+                    bg=self.theme["shop_bg"],
+                    activebackground=self.theme["shop_bg"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    container,
+                    text=f"Use {card.name}",
+                    command=lambda c=card: self.use_cat_card(c),
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=8,
+                    pady=2,
+                )
+            btn.pack(side="left")
+            self.attach_card_tooltip(btn, card)
+
+    def hide_shop_overlay(self) -> None:
+        if not self.shop_overlay_visible:
+            return
+        self.shop_overlay.place_forget()
+        self.shop_overlay_visible = False
+
+    def render_sell_dog_actions(self, player: Player) -> None:
+        if not player.dog_cards:
+            return
+        frame = tk.Frame(self.shop_frame, bg=self.theme["panel_dark"])
+        frame.pack(fill="x", pady=5)
+        self.make_kibble_label(
+            frame,
+            "Sell Dog Cards",
+            2,
+            self.theme["panel_dark"],
+            self.theme["subheader_font"],
+            self.theme["text"],
+        ).pack(anchor="w")
+        for card in list(player.dog_cards):
+            tk.Button(
+                frame,
+                text=f"Sell {card.name}",
+                command=lambda c=card: self.sell_dog_card(player, c),
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            ).pack(anchor="w", pady=1)
+
+    def confirm_sell_dog(self, player: Player, card: Card) -> None:
+        if not self.in_shop:
+            return
+        if card not in player.dog_cards and card not in player.stolen_dog_cards:
+            return
+        self.pending_dog_sale = {"player": player, "card": card}
+        self.render_dog_sell_prompt()
+        self.update_table_view()
+
+    def confirm_sell_cat(self, player: Player, card: Card) -> None:
+        if not self.in_shop:
+            return
+        if card not in player.cat_cards:
+            return
+        self.pending_cat_sale = {"player": player, "card": card}
+        self.render_cat_sell_prompt()
+        self.update_table_view()
+
+    def sell_dog_card(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        in_dogs = card in player.dog_cards
+        in_stolen = card in player.stolen_dog_cards
+        if not in_dogs and not in_stolen:
+            return
+        if in_dogs:
+            player.dog_cards.remove(card)
+        else:
+            player.stolen_dog_cards.remove(card)
+        player.kibbles += 2
+        if card.name == "Pit Baws":
+            self.consume_pit_baws()
+        else:
+            game.dog_deck.add(card)
+        self.add_log(f"{player.name} sold {card.name} for 2 kibbles.")
+        self.pending_dog_sale = None
+        self.update_table_view()
+        self.show_shop()
+
+    def sell_cat_card(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        if card not in player.cat_cards:
+            return
+        player.cat_cards.remove(card)
+        player.kibbles += 1
+        game.cat_deck.add(card)
+        self.add_log(f"{player.name} sold {card.name} for 1 kibble.")
+        self.pending_cat_sale = None
+        self.update_table_view()
+        self.show_shop()
+
+    def render_cat_sell_prompt(self) -> None:
+        if not self.pending_cat_sale:
+            return
+        player = self.pending_cat_sale["player"]
+        card = self.pending_cat_sale["card"]
+        parent = self.shop_body_inner or self.shop_frame
+        for widget in parent.winfo_children():
+            if getattr(widget, "_replace_prompt", False) or getattr(widget, "_sell_prompt", False):
+                widget.destroy()
+        prompt = tk.Frame(parent, bg=self.theme["shop_bg"])
+        prompt._sell_prompt = True
+        prompt.grid(row=3, column=0, sticky="ew", pady=5)
+        parent.grid_rowconfigure(3, weight=0)
+        tk.Label(
+            prompt,
+            text=f"Sell {card.name} for 1 kibble?",
+            font=self.theme["body_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w")
+        actions = tk.Frame(prompt, bg=self.theme["shop_bg"])
+        actions.pack(anchor="w", pady=(4, 0))
+        yes_img = None
+        no_img = None
+        if not hasattr(self, "profile_action_images"):
+            self.profile_action_images = self.load_profile_action_images()
+        if self.profile_action_images:
+            yes_img = self.profile_action_images.get("yes")
+            no_img = self.profile_action_images.get("no")
+        if yes_img:
+            yes_btn = tk.Button(
+                actions,
+                image=yes_img,
+                command=lambda p=player, c=card: self.sell_cat_card(p, c),
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            yes_btn.image = yes_img
+        else:
+            yes_btn = tk.Button(
+                actions,
+                text="Yes",
+                command=lambda p=player, c=card: self.sell_cat_card(p, c),
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        yes_btn.pack(side="left", padx=(0, 6))
+        if no_img:
+            no_btn = tk.Button(
+                actions,
+                image=no_img,
+                command=self.cancel_cat_sale,
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            no_btn.image = no_img
+        else:
+            no_btn = tk.Button(
+                actions,
+                text="No",
+                command=self.cancel_cat_sale,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        no_btn.pack(side="left")
+
+    def cancel_cat_sale(self) -> None:
+        if self.pending_cat_sale:
+            self.pending_cat_sale = None
+            self.show_shop()
+
+    def render_dog_sell_prompt(self) -> None:
+        if not self.pending_dog_sale:
+            return
+        player = self.pending_dog_sale["player"]
+        card = self.pending_dog_sale["card"]
+        parent = self.shop_body_inner or self.shop_frame
+        for widget in parent.winfo_children():
+            if getattr(widget, "_replace_prompt", False) or getattr(widget, "_sell_prompt", False):
+                widget.destroy()
+        prompt = tk.Frame(parent, bg=self.theme["shop_bg"])
+        prompt._sell_prompt = True
+        prompt.grid(row=3, column=0, sticky="ew", pady=5)
+        parent.grid_rowconfigure(3, weight=0)
+        tk.Label(
+            prompt,
+            text=f"Sell {card.name} for 2 kibbles?",
+            font=self.theme["body_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w")
+        actions = tk.Frame(prompt, bg=self.theme["shop_bg"])
+        actions.pack(anchor="w", pady=(4, 0))
+        yes_img = None
+        no_img = None
+        if not hasattr(self, "profile_action_images"):
+            self.profile_action_images = self.load_profile_action_images()
+        if self.profile_action_images:
+            yes_img = self.profile_action_images.get("yes")
+            no_img = self.profile_action_images.get("no")
+        if yes_img:
+            yes_btn = tk.Button(
+                actions,
+                image=yes_img,
+                command=lambda p=player, c=card: self.sell_dog_card(p, c),
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            yes_btn.image = yes_img
+        else:
+            yes_btn = tk.Button(
+                actions,
+                text="Yes",
+                command=lambda p=player, c=card: self.sell_dog_card(p, c),
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        yes_btn.pack(side="left", padx=(0, 6))
+        if no_img:
+            no_btn = tk.Button(
+                actions,
+                image=no_img,
+                command=self.cancel_dog_sale,
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            no_btn.image = no_img
+        else:
+            no_btn = tk.Button(
+                actions,
+                text="No",
+                command=self.cancel_dog_sale,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        no_btn.pack(side="left")
+
+    def cancel_dog_sale(self) -> None:
+        if self.pending_dog_sale:
+            self.pending_dog_sale = None
+            self.show_shop()
+
+    def record_shop_collection(self, player: Player, card: Card) -> None:
+        if not self.in_shop or not self.profile_data:
+            return
+        if not self.is_profile_player(player):
+            return
+        collection = self.profile_data.setdefault("shop_collection", {"cats": [], "dogs": []})
+        key = "cats" if card.kind == "cat" else "dogs"
+        if card.name not in collection.get(key, []):
+            collection[key].append(card.name)
+            self.save_profile()
+
+    def buy_card(self, player: Player, card: Card, index: int, kind: str) -> None:
+        game = self.game
+        if not game:
+            return
+        if self.in_shop:
+            active_idx = self.get_shop_player_index()
+            active_player = (
+                self.players[active_idx] if active_idx is not None and 0 <= active_idx < len(self.players) else None
+            )
+            if active_player and active_player.is_ai:
+                self.show_toast("AI is thinking...")
+                return
+            if active_player and player is not active_player:
+                self.show_toast("Not your turn to shop.")
+                return
+            if self.ai_shop_thinking or self.ai_shop_buy_pending:
+                self.show_toast("AI is thinking...")
+                return
+        free_before = player.free_dog_claims
+        player_index = -1
+        if self.in_shop:
+            try:
+                player_index = self.players.index(player)
+            except ValueError:
+                player_index = -1
+            if 0 <= player_index < len(self.shop_purchase_counts):
+                if (
+                    self.shop_purchase_counts[player_index] >= self.get_shop_purchase_limit(player)
+                    and not (kind == "dog" and player.free_dog_claims > 0)
+                ):
+                    limit = self.get_shop_purchase_limit(player)
+                    self.add_log(f"Shop purchase limit reached ({limit}).")
+                    self.clear_shop_pending_purchases()
+                    if self.in_shop:
+                        self.show_shop()
+                    return
+        if kind == "cat" and len(player.cat_cards) >= game.max_cat_limit(player):
+            if not game.can_buy(player, card, replace_cat=True):
+                self.add_log("Cannot buy this card (cost).")
+                self.show_toast("Not enough kibble")
+                self.clear_shop_pending_purchases()
+                if self.in_shop:
+                    self.show_shop()
+                return
+            self.pending_cat_purchase = {"player": player, "card": card, "index": index, "kind": kind}
+            self.render_cat_replace_prompt()
+            self.update_table_view()
+            return
+        if kind == "dog" and len(player.dog_cards) >= game.max_dog_cards:
+            if not game.can_buy(player, card, replace_dog=True):
+                self.add_log("Cannot buy this card (cost).")
+                self.show_toast("Not enough kibble")
+                self.clear_shop_pending_purchases()
+                if self.in_shop:
+                    self.show_shop()
+                return
+            self.pending_dog_purchase = {"player": player, "card": card, "index": index, "kind": kind}
+            self.render_dog_replace_prompt()
+            self.show_toast("Select a dog from inventory to exchange")
+            self.update_table_view()
+            return
+        if self.debug_ignore_limits:
+            original_limits = (game.max_cat_cards, game.max_dog_cards)
+            game.max_cat_cards = 999
+            game.max_dog_cards = 999
+            try:
+                success = game.buy_card(player, card)
+            finally:
+                game.max_cat_cards, game.max_dog_cards = original_limits
+            if not success:
+                self.add_log("Cannot buy this card (cost or limits).")
+                self.show_toast("Not enough kibble")
+                self.clear_shop_pending_purchases()
+                if self.in_shop:
+                    self.show_shop()
+                return
+        elif not game.buy_card(player, card):
+            self.add_log("Cannot buy this card (cost or limits).")
+            self.show_toast("Not enough kibble")
+            self.clear_shop_pending_purchases()
+            if self.in_shop:
+                self.show_shop()
+            return
+        self.record_shop_collection(player, card)
+        if kind == "dog" and card.name == "Pit Baws":
+            self.consume_pit_baws()
+        if self.in_shop and 0 <= player_index < len(self.shop_purchase_counts):
+            if not (kind == "dog" and free_before > player.free_dog_claims):
+                self.shop_purchase_counts[player_index] += 1
+        if kind == "dog" and free_before > player.free_dog_claims:
+            pending = getattr(player, "pending_tolerant_cards", [])
+            if pending:
+                consumed = pending.pop(0)
+                if consumed in player.cat_cards:
+                    player.cat_cards.remove(consumed)
+                player.pending_tolerant_cards = pending
+        if kind == "cat":
+            game.shop_cats[index] = game.draw_cat()
+            if game.shop_cats[index]:
+                self.shop_flip_targets.add(("cat", index))
+        else:
+            game.shop_dogs[index] = game.draw_dog()
+            if game.shop_dogs[index]:
+                self.shop_flip_targets.add(("dog", index))
+        self.pending_cat_purchase = None
+        self.pending_dog_purchase = None
+        self.update_table_view()
+        self.show_shop()
+
+    def restock_shop_cards(self, kind: str) -> None:
+        game = self.game
+        if not game:
+            return
+        if kind == "cat":
+            cards = game.shop_cats
+            draw_fn = game.draw_cat
+            deck = game.cat_deck
+            exclude = []
+            for p in self.players:
+                exclude.extend(p.cat_cards)
+        else:
+            cards = game.shop_dogs
+            draw_fn = game.draw_dog
+            deck = game.dog_deck
+            exclude = []
+            for p in self.players:
+                exclude.extend(p.dog_cards)
+                exclude.extend(p.stolen_dog_cards)
+        missing = [i for i, c in enumerate(cards) if c is None]
+        if not missing:
+            return
+        exclude.extend([c for c in cards if c])
+        deck.reshuffle(exclude=exclude)
+        for i in missing:
+            cards[i] = draw_fn()
+            if cards[i]:
+                self.shop_flip_targets.add((kind, i))
+        if not self.shop_reshuffle_notified.get(kind, False):
+            label = "Cat" if kind == "cat" else "Dog"
+            self.show_toast(f"{label} deck reshuffled")
+            self.play_sound(self.flip_sound)
+            self.shop_reshuffle_notified[kind] = True
+
+    def next_shop_player(self) -> None:
+        current_idx = self.get_shop_player_index()
+        if current_idx is not None:
+            self.clear_pending_tolerant(self.players[current_idx])
+        self.shop_player_index += 1
+        self.ai_shop_thinking_player = None
+        next_idx = self.get_shop_player_index()
+        if next_idx is not None and self.players[next_idx].is_ai:
+            self.show_shop()
+            self.root.after(1, self.run_ai_shop)
+            return
+        self.show_shop()
+
+    def advance_round(self) -> None:
+        game = self.game
+        if not game:
+            return
+        game.round_num += 1
+        if game.round_num > 9:
+            self.end_game()
+            return
+        self.start_round()
+
+    def end_game(self) -> None:
+        standings = sorted(self.players, key=lambda p: p.total_score, reverse=True)
+        self.update_profile_after_game(standings)
+        self.end_game_standings = standings
+        lines = ["Final Scores"]
+        for p in standings:
+            lines.append(f"- {p.name}: {p.total_score:.1f}")
+        lines.append("")
+        lines.append("Round Breakdown")
+        for entry in reversed(self.round_history):
+            lines.append(f"Round {entry['round']}")
+            for score in entry["scores"]:
+                lines.append(f"  {score['player']}: {score['total']} ({score['name']})")
+        lines.append("")
+        lines.append("Top Bonus Cards")
+        for p in standings:
+            bonuses = self.bonus_points_by_player.get(p.name, {})
+            if not bonuses:
+                lines.append(f"- {p.name}: No bonus cards used")
+                continue
+            top_card = max(bonuses.items(), key=lambda x: x[1])
+            lines.append(f"- {p.name}: {top_card[0]} (+{top_card[1]} pts)")
+        self.show_end_game_screen("\n".join(lines))
+        self.show_final_rank_toasts(standings)
+
+    def run_ai_turn(self) -> None:
+        game = self.game
+        if not game:
+            return
+        player = self.players[game.turn_index]
+        if not player.is_ai:
+            return
+        if not self.ai_turn_still_current(player):
+            return
+        self.ai_reroll_step(player)
+
+    def show_final_rank_toasts(self, standings: list[Player]) -> None:
+        if not standings:
+            return
+        messages = []
+        player1 = self.players[0] if self.players else None
+        if player1 and standings and standings[0] is player1:
+            self.play_sound(self.victory_sound)
+        for idx, player in enumerate(standings[:4], start=1):
+            if player1 and player is player1 and idx == 1:
+                display_name = self.profile_data.get("name") if self.profile_data else player.name
+                messages.append(f"{display_name} wins the game!")
+            else:
+                place = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}.get(idx, f"{idx}th")
+                messages.append(f"{player.name} finished {place}!")
+        for i, msg in enumerate(messages):
+            is_leader = i == 0
+            self.root.after(
+                i * 2200,
+                lambda m=msg, leader=is_leader: self.show_end_game_toast(
+                    m, duration_ms=2000, rainbow=leader
+                ),
+            )
+
+    def ai_reroll_step(self, player: Player) -> None:
+        game = self.game
+        if not game:
+            return
+        if not self.ai_turn_still_current(player):
+            return
+        if getattr(player, "rerolls_blocked", False):
+            self.finish_ai_turn(player)
+            return
+        if game.rerolls_left <= 0:
+            self.finish_ai_turn(player)
+            return
+        if player.bag.total() <= 0 and player.turn_nimble_dice <= 0:
+            self.finish_ai_turn(player)
+            return
+        if game.rerolls_left <= 1:
+            used = self.run_ai_cat_cards(player)
+            if used:
+                self.root.after(700, lambda: self.ai_reroll_step(player))
+                return
+        indices = self.ai_choose_reroll_indices(game.current_hand, player)
+        if not indices:
+            self.finish_ai_turn(player)
+            return
+        for var in self.dice_vars:
+            var.set(False)
+        for idx in indices:
+            if idx < len(self.dice_vars):
+                self.dice_vars[idx].set(True)
+        if self.speed_var.get():
+            self.apply_ai_reroll(player, indices)
+        else:
+            self.root.after(600, lambda: self.apply_ai_reroll(player, indices))
+
+    def apply_ai_reroll(self, player: Player, indices: list[int]) -> None:
+        game = self.game
+        if not game:
+            return
+        if not self.ai_turn_still_current(player):
+            return
+        rerolled_positions = game.reroll(player, indices)
+        self.start_roll_animation(
+            indices=rerolled_positions,
+            on_finish=lambda: (self.finish_reroll_animation(), self.ai_reroll_step(player)),
+        )
+
+    def finish_ai_turn(self, player: Player) -> None:
+        game = self.game
+        if not game:
+            return
+        if not self.ai_turn_still_current(player):
+            return
+        if game.rerolls_left <= 0:
+            used = self.run_ai_cat_cards(player)
+            if used:
+                self.root.after(700, lambda: self.finish_ai_turn(player))
+                return
+        if game.rerolls_left <= 0:
+            game.current_hand.sort(key=lambda d: d.value)
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+            self.render_hand()
+            self.update_status()
+            if self.speed_var.get():
+                self.root.after(1, lambda: self.safe_ai_end_turn(player))
+            else:
+                self.root.after(3000, lambda: self.safe_ai_end_turn(player))
+            return
+        self.safe_ai_end_turn(player)
+
+    def ai_turn_still_current(self, player: Player) -> bool:
+        return bool(self.game and self.players[self.game.turn_index] is player and player.is_ai)
+
+    def safe_ai_end_turn(self, player: Player) -> None:
+        if not self.ai_turn_still_current(player):
+            return
+        self.on_end_turn()
+
+    def ai_sample_draw_colors(self, counts: dict[str, int], n: int) -> list[str]:
+        drawn: list[str] = []
+        if n <= 0:
+            return drawn
+        pool = dict(counts)
+        for _ in range(n):
+            total = sum(pool.values())
+            if total <= 0:
+                break
+            roll = random.randint(1, total)
+            running = 0
+            for color, count in list(pool.items()):
+                running += count
+                if roll <= running:
+                    drawn.append(color)
+                    if count <= 1:
+                        pool.pop(color, None)
+                    else:
+                        pool[color] = count - 1
+                    break
+        return drawn
+
+    def ai_expected_reroll_score(
+        self,
+        hand: list[Die],
+        player: Player,
+        indices: list[int],
+        samples: int = 30,
+    ) -> float:
+        if not hand:
+            return 0.0
+        reroll = sorted(set(i for i in indices if 0 <= i < len(hand)))
+        if not reroll:
+            value_wild_ids = None
+            if self.is_starlight_active(player):
+                value_wild_ids = {id(die) for die in hand if die.color == "purple"}
+            result = best_score(
+                hand,
+                player,
+                self.get_color_overrides(player),
+                value_wild_ids,
+            )
+            return float(result.total)
+        bag_counts = dict(player.bag.counts)
+        orig_overrides = self.get_color_overrides(player) or {}
+        total = 0.0
+        for _ in range(samples):
+            nimble_count = min(player.turn_nimble_dice, len(reroll))
+            nimble_indices = set(reroll[:nimble_count])
+            bag_indices = [idx for idx in reroll if idx not in nimble_indices]
+            sim_hand: list[Die] = []
+            sim_overrides: dict[int, str] = {}
+            for idx, die in enumerate(hand):
+                if idx in reroll:
+                    continue
+                new_die = Die(die.color, die.value)
+                sim_hand.append(new_die)
+                override = orig_overrides.get(id(die))
+                if override:
+                    sim_overrides[id(new_die)] = override
+            for idx in nimble_indices:
+                if idx < len(hand):
+                    die = hand[idx]
+                    sim_hand.append(Die(die.color, random.randint(1, 6)))
+            if bag_indices:
+                colors = self.ai_sample_draw_colors(bag_counts, len(bag_indices))
+                for color in colors:
+                    sim_hand.append(Die(color, random.randint(1, 6)))
+            value_wild_ids = None
+            if self.is_starlight_active(player):
+                value_wild_ids = {id(die) for die in sim_hand if die.color == "purple"}
+            result = best_score(
+                sim_hand,
+                player,
+                sim_overrides if sim_overrides else None,
+                value_wild_ids,
+            )
+            total += float(result.total)
+        return total / max(1, samples)
+
+    def ai_choose_reroll_indices(self, hand, player: Player) -> List[int]:
+        if not hand:
+            return []
+        game = self.game
+        if game:
+            has_bull = any(
+                c.name == "Bull Dawg" for c in (player.dog_cards + player.stolen_dog_cards)
+            )
+            if has_bull and player.bull_dawg_triggered_round != game.round_num:
+                potential = self.ai_hand_potential(hand, player)
+                if potential.get("max_count", 0) <= 1 and not potential.get("straight_draw"):
+                    return list(range(len(hand)))
+        counts = {}
+        for die in hand:
+            counts[die.value] = counts.get(die.value, 0) + 1
+        mods = build_dog_modifiers(player)
+        result = best_score(
+            hand,
+            player,
+            self.get_color_overrides(player),
+            self.get_value_wild_ids(hand, player),
+        )
+        base_dice = self.get_base_hand_dice(result, player)
+        base_set = set(base_dice)
+        strong_names = {
+            "Five of a kind",
+            "Four of a kind",
+            "Four of a kind (as five)",
+            "Full house",
+            "Large straight",
+            "Small straight (as large)",
+        }
+        if result.name in strong_names:
+            return []
+        color_counts: dict[str, int] = {}
+        for die in hand:
+            color = self.effective_die_color(die, player)
+            color_counts[color] = color_counts.get(color, 0) + 1
+
+        unique_vals = sorted(set(d.value for d in hand))
+        straight_windows = []
+        for start in range(1, 4):
+            window = set(range(start, start + 4))
+            if window.issubset(unique_vals):
+                straight_windows.append(window)
+        max_count = max(counts.values()) if counts else 0
+        straight_draw = bool(straight_windows)
+        behind = False
+        if self.players:
+            leader_score = max(p.total_score for p in self.players)
+            behind = player.total_score < leader_score
+
+        def bonus_score(die: Die) -> int:
+            bonus = 0
+            die_color = self.effective_die_color(die, player)
+            if mods.objective_color and (die_color == mods.objective_color or die_color == "purple"):
+                bonus += 1
+            bonus += mods.color_die_bonus.get(die_color, 0)
+            if die_color == "purple":
+                bonus += mods.purple_die_bonus
+            if color_counts.get(die_color, 0) == 2 and mods.color_pair_bonus:
+                bonus += max(1, mods.color_pair_bonus // 2)
+            return bonus
+
+        keep = set(base_set)
+        if behind:
+            if straight_draw:
+                keep = set(
+                    die
+                    for die in hand
+                    if any(die.value in window for window in straight_windows)
+                )
+            elif max_count >= 3:
+                keep = {die for die in hand if counts.get(die.value, 0) == max_count}
+            elif result.total <= 2:
+                return list(range(len(hand)))
+        if self.ai_wants_purple(player):
+            for die in hand:
+                if self.effective_die_color(die, player) == "purple":
+                    keep.add(die)
+        if mods.purple_die_bonus > 0:
+            for die in hand:
+                if self.effective_die_color(die, player) == "purple":
+                    keep.add(die)
+        if not keep:
+            scored = sorted(hand, key=bonus_score, reverse=True)
+            for die in scored[:2]:
+                if bonus_score(die) > 0:
+                    keep.add(die)
+        else:
+            for die in hand:
+                if die in keep:
+                    continue
+                if bonus_score(die) >= 2:
+                    keep.add(die)
+
+        def keep_score(die: Die) -> float:
+            value_score = counts.get(die.value, 0) * 1.2
+            straight_score = 0.6 if any(die.value in w for w in straight_windows) else 0.0
+            return value_score + bonus_score(die) + straight_score
+
+        indices = [idx for idx, die in enumerate(hand) if die not in keep]
+        if not indices:
+            if result.total <= 3:
+                ranked = sorted(
+                    [(keep_score(die), idx) for idx, die in enumerate(hand)],
+                    key=lambda x: x[0],
+                )
+                if ranked:
+                    indices = [ranked[0][1]]
+
+        candidates: list[list[int]] = []
+
+        def add_candidate(idxs: list[int]) -> None:
+            cleaned = sorted(set(i for i in idxs if 0 <= i < len(hand)))
+            if cleaned not in candidates:
+                candidates.append(cleaned)
+
+        add_candidate(indices)
+        add_candidate([])
+        add_candidate(list(range(len(hand))))
+        if mods.objective_color:
+            add_candidate(
+                [
+                    i
+                    for i, die in enumerate(hand)
+                    if self.effective_die_color(die, player)
+                    not in (mods.objective_color, "purple")
+                ]
+            )
+        if max_count >= 2:
+            add_candidate(
+                [i for i, die in enumerate(hand) if counts.get(die.value, 0) != max_count]
+            )
+        if straight_draw:
+            add_candidate(
+                [
+                    i
+                    for i, die in enumerate(hand)
+                    if not any(die.value in window for window in straight_windows)
+                ]
+            )
+        ranked_bonus = sorted(
+            [(keep_score(die), idx) for idx, die in enumerate(hand)],
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        if ranked_bonus:
+            top_keep = {idx for _, idx in ranked_bonus[:2]}
+            add_candidate([i for i in range(len(hand)) if i not in top_keep])
+
+        bag_total = player.bag.total()
+        if bag_total <= 0:
+            max_reroll = max(0, player.turn_nimble_dice)
+            candidates = [c for c in candidates if len(c) <= max_reroll]
+            if not candidates:
+                return []
+
+        samples = 20 if self.speed_var.get() else 30
+        best_indices = indices
+        best_expected = -1.0
+        for candidate in candidates:
+            expected = self.ai_expected_reroll_score(hand, player, candidate, samples=samples)
+            expected -= 0.05 * len(candidate)
+            if expected > best_expected:
+                best_expected = expected
+                best_indices = candidate
+        return best_indices
+
+    def run_ai_shop(self) -> None:
+        game = self.game
+        if not game:
+            return
+        if self.shop_player_index >= len(self.shop_order):
+            return
+        if self.ai_shop_thinking:
+            return
+        if self.ai_shop_buy_pending:
+            return
+        player_idx = self.get_shop_player_index()
+        if player_idx is None:
+            return
+        player = self.players[player_idx]
+        if not player.is_ai:
+            return
+        if (
+            not self.speed_var.get()
+            and self.ai_shop_thinking_player != player_idx
+        ):
+            self.ai_shop_thinking = True
+            self.ai_shop_thinking_player = player_idx
+            self.show_toast(f"{player.name} is thinking...")
+            self.start_ai_hand_cycle()
+            self.ai_shop_thinking_job = self.root.after(3000, self.resume_ai_shop)
+            return
+        if (
+            0 <= player_idx < len(self.shop_purchase_counts)
+            and self.shop_purchase_counts[player_idx] >= self.get_shop_purchase_limit(player)
+            and player.free_dog_claims <= 0
+        ):
+            self.add_log(f"{player.name} reached the shop purchase limit.")
+            self.stop_ai_hand_cycle(clear=True)
+            self.stop_ai_hand_blink(clear=True)
+            self.next_shop_player()
+            return
+        tolerant_cards = [c for c in player.cat_cards if c.name == "Tolerant Cat"]
+        if tolerant_cards and game.shop_dogs and player.free_dog_claims <= 0 and not getattr(player, "pending_tolerant_cards", []):
+            tolerant = tolerant_cards[0]
+            pending = getattr(player, "pending_tolerant_cards", [])
+            pending.append(tolerant)
+            player.pending_tolerant_cards = pending
+            player.free_dog_claims += 1
+            self.add_log(f"{player.name} used Tolerant Cat in shop.")
+        human = self.get_human_player()
+        deny_offer = None
+        if human and human is not player and any(game.shop_dogs):
+            threshold = self.ai_denial_threshold(human)
+            for i, card in enumerate(game.shop_dogs):
+                if not card:
+                    continue
+                deny_score = self.ai_deny_score_for_human(card)
+                if deny_score >= threshold and (
+                    deny_offer is None or deny_score > deny_offer[2]
+                ):
+                    deny_offer = (i, card, deny_score)
+            if deny_offer:
+                _idx, deny_card, deny_score = deny_offer
+                cost = game.dog_card_cost(player, deny_card)
+                if player.free_dog_claims <= 0:
+                    worst = self.ai_worst_owned_dog(player)
+                    if worst and worst[2] + 0.4 < deny_score:
+                        if player.kibbles < cost and player.kibbles + 2 >= cost:
+                            self.sell_dog_card_for_ai(player, worst[1])
+                        elif (
+                            player.kibbles >= cost
+                            and len(player.dog_cards) >= game.max_dog_cards
+                        ):
+                            self.sell_dog_card_for_ai(player, worst[1])
+        for card in list(player.cat_cards):
+            if card.name not in (
+                "Present Cat",
+                "Regal Cat",
+                "Bat Cat",
+                "Stray Cat",
+                "Cat Tackle",
+                "Raccoon Cat",
+            ):
+                continue
+            if not self.ai_should_use_cat_card(player, card):
+                continue
+            player.cat_cards.remove(card)
+            if card.name in ("Present Cat", "Regal Cat"):
+                game.apply_card(player, card)
+            elif card.name == "Bat Cat":
+                self.ai_apply_bat_cat(player)
+            elif card.name == "Stray Cat":
+                self.ai_apply_stray_cat(player)
+            elif card.name == "Cat Tackle":
+                self.ai_apply_cat_tackle(player, card)
+            elif card.name == "Raccoon Cat":
+                self.ai_apply_raccoon_cat(player, card)
+            self.add_log(f"{player.name} used {card.name} in shop.")
+        if any(game.shop_dogs):
+            best_offer = self.ai_best_shop_dog(player)
+            if best_offer:
+                _, best_card, best_score = best_offer
+                if player.kibbles < best_card.cost and player.kibbles + 2 >= best_card.cost:
+                    worst = self.ai_worst_owned_dog(player)
+                    if worst and worst[2] + 0.6 < best_score:
+                        self.sell_dog_card_for_ai(player, worst[1])
+        choice = self.ai_choose_shop_card(player)
+        if not choice:
+            self.pending_ai_shop_toast = None
+            self.add_log(f"{player.name} cannot afford a card and passes.")
+            self.stop_ai_hand_cycle(clear=True)
+            self.next_shop_player()
+            return
+        kind, index, card, replace_cat, replace_dog = choice
+        self.ai_shop_buy_pending = True
+        self.start_ai_hand_blink(
+            kind,
+            index,
+            lambda: self.finish_ai_shop_purchase(player, choice),
+        )
+        return
+
+    def finish_ai_shop_purchase(self, player: Player, choice) -> None:
+        game = self.game
+        if not game:
+            self.ai_shop_buy_pending = False
+            return
+        self.play_sound(self.flip_sound)
+        kind, index, card, replace_cat, replace_dog = choice
+        free_before = player.free_dog_claims
+        reason_shown = False
+        if game.buy_card(player, card, replace_cat=replace_cat, replace_dog=replace_dog):
+            self.add_log(f"{player.name} bought {card.name}.")
+            if kind == "cat":
+                game.shop_cats[index] = game.draw_cat()
+                if game.shop_cats[index]:
+                    self.shop_flip_targets.add(("cat", index))
+            else:
+                game.shop_dogs[index] = game.draw_dog()
+                if game.shop_dogs[index]:
+                    self.shop_flip_targets.add(("dog", index))
+            if 0 <= self.shop_player_index < len(self.shop_purchase_counts):
+                if not (kind == "dog" and free_before > player.free_dog_claims):
+                    self.shop_purchase_counts[self.shop_player_index] += 1
+            if kind == "dog" and free_before > player.free_dog_claims:
+                pending = getattr(player, "pending_tolerant_cards", [])
+                if pending:
+                    consumed = pending.pop(0)
+                    if consumed in player.cat_cards:
+                        player.cat_cards.remove(consumed)
+                    player.pending_tolerant_cards = pending
+            if (
+                self.pending_ai_shop_toast
+                and self.pending_ai_shop_toast[0] is player
+            ):
+                self.show_toast(self.pending_ai_shop_toast[1])
+                reason_shown = True
+            self.pending_ai_shop_toast = None
+        else:
+            self.add_log(f"{player.name} could not buy {card.name}.")
+            self.pending_ai_shop_toast = None
+        self.ai_shop_buy_pending = False
+        self.stop_ai_hand_cycle(clear=True)
+        self.stop_ai_hand_blink(clear=True)
+        self.update_table_view()
+        if reason_shown:
+            self.root.after(800, self.next_shop_player)
+        else:
+            self.next_shop_player()
+
+    def resume_ai_shop(self) -> None:
+        self.ai_shop_thinking = False
+        self.ai_shop_thinking_job = None
+        if not self.in_shop:
+            return
+        self.run_ai_shop()
+
+    def _apply_shop_card_image(self, entry: dict, image: tk.PhotoImage | None) -> None:
+        widget = entry.get("widget")
+        if not widget:
+            return
+        canvas_id = entry.get("canvas_id")
+        if canvas_id is not None:
+            try:
+                widget.itemconfigure(canvas_id, image=image)
+                widget._aihand_overlay = image
+            except Exception:
+                pass
+        else:
+            try:
+                widget.configure(image=image)
+                widget.image = image
+            except Exception:
+                pass
+
+    def compose_ai_hand_image(self, base_img: tk.PhotoImage | None) -> tk.PhotoImage | None:
+        if not base_img or not Image or not ImageTk:
+            return None
+        hand_img = self.ui_images.get("aihand")
+        if not hand_img:
+            return None
+        try:
+            base_pil = ImageTk.getimage(base_img).convert("RGBA")
+            hand_pil = ImageTk.getimage(hand_img).convert("RGBA")
+        except Exception:
+            return None
+        x = max(0, (base_pil.width - hand_pil.width) // 2)
+        y = max(0, base_pil.height - hand_pil.height)
+        composed = base_pil.copy()
+        composed.paste(hand_pil, (x, y), hand_pil)
+        return ImageTk.PhotoImage(composed)
+
+    def clear_ai_hand_icons(self) -> None:
+        for slots in self.shop_card_widgets.values():
+            for entry in slots.values():
+                base = entry.get("base_image")
+                if base:
+                    self._apply_shop_card_image(entry, base)
+                entry["overlay_image"] = None
+
+    def stop_ai_hand_cycle(self, clear: bool = False) -> None:
+        self.ai_hand_cycle_active = False
+        if self.ai_hand_cycle_job:
+            try:
+                self.root.after_cancel(self.ai_hand_cycle_job)
+            except Exception:
+                pass
+            self.ai_hand_cycle_job = None
+        self.ai_hand_cycle_slots = []
+        if clear:
+            self.clear_ai_hand_icons()
+
+    def start_ai_hand_cycle(self) -> None:
+        self.stop_ai_hand_cycle(clear=True)
+        slots = []
+        for kind in ("cat", "dog"):
+            for idx in sorted(self.shop_card_widgets.get(kind, {}).keys()):
+                slots.append((kind, idx))
+        if not slots:
+            return
+        self.ai_hand_cycle_active = True
+        self.ai_hand_cycle_slots = slots
+        self.ai_hand_cycle_index = 0
+        self._ai_hand_cycle_step()
+
+    def _ai_hand_cycle_step(self) -> None:
+        if not self.ai_hand_cycle_active or not self.in_shop:
+            return
+        if not self.ai_hand_cycle_slots:
+            return
+        self.clear_ai_hand_icons()
+        kind, index = self.ai_hand_cycle_slots[self.ai_hand_cycle_index % len(self.ai_hand_cycle_slots)]
+        entry = self.shop_card_widgets.get(kind, {}).get(index)
+        if entry and entry.get("base_image"):
+            if not entry.get("overlay_image"):
+                entry["overlay_image"] = self.compose_ai_hand_image(entry["base_image"])
+            if entry.get("overlay_image"):
+                self._apply_shop_card_image(entry, entry["overlay_image"])
+        self.ai_hand_cycle_index += 1
+        self.ai_hand_cycle_job = self.root.after(250, self._ai_hand_cycle_step)
+
+    def stop_ai_hand_blink(self, clear: bool = False) -> None:
+        if self.ai_hand_blink_job:
+            try:
+                self.root.after_cancel(self.ai_hand_blink_job)
+            except Exception:
+                pass
+            self.ai_hand_blink_job = None
+        if clear:
+            self.clear_ai_hand_icons()
+        self.ai_hand_blink_label = None
+        self.ai_hand_blink_visible = False
+        self.ai_hand_blink_remaining = 0
+
+    def start_ai_hand_blink(self, kind: str, index: int, on_finish) -> None:
+        entry = self.shop_card_widgets.get(kind, {}).get(index)
+        if not entry or not entry.get("base_image"):
+            on_finish()
+            return
+        self.stop_ai_hand_cycle(clear=True)
+        self.stop_ai_hand_blink(clear=True)
+        self.clear_ai_hand_icons()
+        self.ai_hand_blink_label = entry
+        self.ai_hand_blink_visible = True
+        self.ai_hand_blink_remaining = 2000
+        if not entry.get("overlay_image"):
+            entry["overlay_image"] = self.compose_ai_hand_image(entry["base_image"])
+        if entry.get("overlay_image"):
+            self._apply_shop_card_image(entry, entry["overlay_image"])
+        self.ai_hand_blink_job = self.root.after(250, lambda: self._ai_hand_blink_step(on_finish))
+
+    def _ai_hand_blink_step(self, on_finish) -> None:
+        entry = self.ai_hand_blink_label
+        if not entry or not self.in_shop:
+            self.stop_ai_hand_blink(clear=True)
+            on_finish()
+            return
+        self.ai_hand_blink_remaining -= 250
+        if self.ai_hand_blink_remaining <= 0:
+            if entry.get("overlay_image"):
+                self._apply_shop_card_image(entry, entry["overlay_image"])
+            self.stop_ai_hand_blink(clear=False)
+            on_finish()
+            return
+        if self.ai_hand_blink_visible:
+            base = entry.get("base_image")
+            if base:
+                self._apply_shop_card_image(entry, base)
+        else:
+            if entry.get("overlay_image"):
+                self._apply_shop_card_image(entry, entry["overlay_image"])
+        self.ai_hand_blink_visible = not self.ai_hand_blink_visible
+        self.ai_hand_blink_job = self.root.after(250, lambda: self._ai_hand_blink_step(on_finish))
+
+    def ai_color_weights(self, player: Player) -> dict:
+        total = max(player.bag.total(), 1)
+        weights = {c: player.bag.counts.get(c, 0) / total for c in COLORS}
+        if player.objective_color in weights:
+            weights[player.objective_color] += 0.8
+        if player.is_ai:
+            weights["purple"] = weights.get("purple", 0) + 0.6
+        if any(
+            c.name == "Psychedelic Dawg"
+            for c in (player.dog_cards + player.stolen_dog_cards)
+        ):
+            weights["purple"] = weights.get("purple", 0) + 1.3
+            if player.objective_color in weights:
+                weights[player.objective_color] += 0.2
+        if any(
+            c.name in ("Who Let the Dawgs Out?", "Best Buddies")
+            for c in (player.dog_cards + player.stolen_dog_cards)
+        ):
+            top_color = max(BASE_COLORS, key=lambda c: weights.get(c, 0))
+            weights[top_color] = weights.get(top_color, 0) + 0.3
+        return weights
+
+    def ai_wants_purple(self, player: Player) -> bool:
+        return bool(player.is_ai)
+
+    def get_human_player(self) -> Player | None:
+        if not self.players:
+            return None
+        return self.players[0]
+
+    def get_recent_round_score(self, target: Player) -> float:
+        for entry in reversed(self.round_history):
+            for score in entry.get("scores", []):
+                if score.get("player") == target.name:
+                    return float(score.get("total", 0))
+        return 0.0
+
+    def get_recent_round_hand_name(self, target: Player) -> str | None:
+        for entry in reversed(self.round_history):
+            for score in entry.get("scores", []):
+                if score.get("player") == target.name:
+                    return score.get("name")
+        return None
+
+    def ai_threat_score(self, target: Player) -> float:
+        score = target.total_score
+        score += float(target.kibbles) * 0.4
+        score += self.get_recent_round_score(target) * 0.6
+        dog_cards = target.dog_cards + target.stolen_dog_cards + target.temp_dog_cards
+        if dog_cards:
+            dog_scores = sorted(
+                (self.ai_score_dog_card(target, c) for c in dog_cards),
+                reverse=True,
+            )
+            dog_power = dog_scores[0]
+            if len(dog_scores) > 1:
+                dog_power += sum(dog_scores[:2]) * 0.35
+            score += dog_power * 0.9
+        human = self.get_human_player()
+        if human is target:
+            score += 2.0
+        return score
+
+    def ai_denial_threshold(self, human: Player) -> float:
+        threat = self.ai_threat_score(human)
+        return max(2.0, 2.6 - min(0.6, threat * 0.04))
+
+    def ai_deny_score_for_human(self, card: Card) -> float:
+        human = self.get_human_player()
+        if not human or card.kind != "dog":
+            return 0.0
+        base = self.ai_score_dog_card(human, card)
+        weights = self.ai_color_weights(human)
+        objective_weight = weights.get(human.objective_color, 0.0) if human.objective_color else 0.0
+        top_color_weight = max(weights.get(c, 0.0) for c in BASE_COLORS)
+        dog_names = {
+            c.name for c in (human.dog_cards + human.stolen_dog_cards + human.temp_dog_cards)
+        }
+        straight_boosts = {"Big Dawg Energy", "Reservoir Dawgs"}
+        kind_boosts = {"4 Shot Saluki", "Diamond Dawg", "Dawg House", "Tri-tail Dawg", "Barrel Dawg", "Barrel Dog"}
+        color_boosts = {"Who Let the Dawgs Out?", "Best Buddies", "Snuggle Buddies"}
+        plus_one_cards = {
+            "Psychedelic Dawg",
+            "Reservoir Dawgs",
+            "Dawg House",
+            "Diamond Dawg",
+            "Barrel Dawg",
+            "Barrel Dog",
+            "Tri-tail Dawg",
+            "One Dawg Wolf Pack",
+        }
+        if card.name in straight_boosts:
+            base += 1.1
+            if dog_names.intersection(straight_boosts):
+                base += 0.4
+        if human.objective_color and card.name in color_boosts:
+            base += 0.8 + top_color_weight + (objective_weight * 0.6)
+        if card.name in kind_boosts:
+            base += 0.7
+        if "Daredevil Dawg" in dog_names and card.name in plus_one_cards:
+            base += 1.0
+        if card.name == "Psychedelic Dawg" and human.bag.counts.get("purple", 0) > 0:
+            base += 0.8 + weights.get("purple", 0) * 1.6
+        if card.name in ("Alpha Dawg", "Golden Dawg", "Cats Best Friend"):
+            base += 0.6
+        last_hand = self.get_recent_round_hand_name(human)
+        if last_hand and "straight" in last_hand.lower() and card.name in straight_boosts:
+            base += 1.2
+        return base
+
+    def ai_denial_reason_text(self, card: Card, human: Player) -> str:
+        if card.name == "Psychedelic Dawg":
+            return "strengthen purple scoring"
+        if card.name in ("Big Dawg Energy", "Reservoir Dawgs"):
+            last_hand = self.get_recent_round_hand_name(human)
+            if last_hand and "straight" in last_hand.lower():
+                return "reinforce straight momentum"
+            return "improve straight bonuses"
+        if card.name in ("Who Let the Dawgs Out?", "Best Buddies", "Snuggle Buddies"):
+            if human.objective_color:
+                return f"improve {human.objective_color} color synergy"
+            return "improve same-color bonuses"
+        if card.name in (
+            "4 Shot Saluki",
+            "Diamond Dawg",
+            "Dawg House",
+            "Tri-tail Dawg",
+            "Barrel Dawg",
+            "Barrel Dog",
+        ):
+            return "improve hand-type bonuses"
+        if card.name in ("Alpha Dawg", "Golden Dawg", "Cats Best Friend"):
+            return "improve shop economy"
+        if card.name == "Daredevil Dawg":
+            return "amplify +1 dog effects"
+        if card.name in ("Service Dawg", "Scurvy Dawg", "Mascot Dawg", "Goodest Dawg", "Street Dawg"):
+            return "improve comeback potential"
+        return "improve long-term build strength"
+
+    def ai_reasoned_toast(
+        self,
+        actor: Player,
+        target: Player | None,
+        text: str,
+        reason: str | None = None,
+    ) -> None:
+        human = self.get_human_player()
+        if human and target is human and reason:
+            self.show_toast(f"{text} - {reason}")
+        else:
+            self.show_toast(text)
+
+    def ai_pick_disruption_target(self, candidates: list[Player]) -> Player | None:
+        if not candidates:
+            return None
+        return max(candidates, key=self.ai_threat_score)
+
+    def ai_should_disrupt(self, player: Player) -> bool:
+        human = self.get_human_player()
+        if not human or human is player:
+            return True
+        if self.ai_threat_score(human) >= 6.0:
+            return True
+        leader_score = max((p.total_score for p in self.players), default=0.0)
+        recent = self.get_recent_round_score(human)
+        if human.total_score >= leader_score:
+            return True
+        if human.kibbles >= player.kibbles + 2:
+            return True
+        if recent >= 6:
+            return True
+        if human.total_score - player.total_score >= 5:
+            return True
+        return False
+
+    def ai_hand_potential(self, hand, player: Player) -> dict:
+        if not hand:
+            return {"max_count": 0, "pairs": 0, "straight_draw": False}
+        counts = {}
+        for die in hand:
+            counts[die.value] = counts.get(die.value, 0) + 1
+        max_count = max(counts.values())
+        pairs = sum(1 for c in counts.values() if c == 2)
+        unique_vals = sorted(set(counts.keys()))
+        straight_draw = False
+        if len(unique_vals) >= 4:
+            for start in range(1, 4):
+                needed = set(range(start, start + 4))
+                if needed.issubset(unique_vals):
+                    straight_draw = True
+                    break
+        return {"max_count": max_count, "pairs": pairs, "straight_draw": straight_draw}
+
+    def ai_score_dog_card(self, player: Player, card: Card) -> float:
+        weights = self.ai_color_weights(player)
+        owned = [c.name for c in (player.dog_cards + player.stolen_dog_cards)]
+        dup_penalty = 0.6 if card.name in owned else 1.0
+        penalty_next = False
+        if self.game and player.pending_roll_penalty > 0:
+            penalty_next = player.pending_roll_penalty_round == self.game.round_num + 1
+        max_color_weight = max(weights.get(c, 0) for c in BASE_COLORS)
+        objective_weight = weights.get(player.objective_color, 0) if player.objective_color else 0.0
+        behind = False
+        potential = {}
+        if self.game and self.game.current_hand and not self.in_shop:
+            potential = self.ai_hand_potential(self.game.current_hand, player)
+        max_count = potential.get("max_count", 0)
+        pairs = potential.get("pairs", 0)
+        straight_draw = potential.get("straight_draw", False)
+        if self.players:
+            leader_score = max(p.total_score for p in self.players)
+            behind = player.total_score < leader_score
+        if card.name == "Psychedelic Dawg":
+            base = (weights.get("purple", 0) * 6.0 + 1.0)
+            if player.is_ai and self.ai_wants_purple(player):
+                base += 2.0
+            return base * dup_penalty
+        if card.name == "Big Dawg Energy":
+            return 2.0 * dup_penalty
+        if card.name == "Reservoir Dawgs":
+            return 2.2 * dup_penalty
+        if card.name == "Who Let the Dawgs Out?":
+            return (3.0 * max_color_weight + 0.8 + objective_weight) * dup_penalty
+        if card.name == "4 Shot Saluki":
+            return 2.6 * dup_penalty
+        if card.name == "Dawg House":
+            return 2.2 * dup_penalty
+        if card.name == "One Dawg Wolf Pack":
+            diversity = len([c for c in BASE_COLORS if weights.get(c, 0) > 0.1])
+            return (0.4 + 0.3 * diversity) * dup_penalty
+        if card.name == "Snuggle Buddies":
+            return (1.2 + max_color_weight + objective_weight) * dup_penalty
+        if card.name == "Diamond Dawg":
+            return 1.8 * dup_penalty
+        if card.name == "Best Buddies":
+            return (1.0 + max_color_weight + objective_weight) * dup_penalty
+        if card.name == "Goodest Dawg":
+            return (2.4 if behind else 1.4) * dup_penalty
+        if card.name == "Street Dawg":
+            return (3.0 if behind else 1.8) * dup_penalty
+        if card.name == "Tri-tail Dawg":
+            bonus = 0.8 if max_count >= 3 else 0.0
+            return (2.0 + bonus) * dup_penalty
+        if card.name in ("Barrel Dawg", "Barrel Dog"):
+            bonus = 0.6 if pairs >= 1 else 0.0
+            return (1.9 + bonus) * dup_penalty
+        if card.name == "Cats Best Friend":
+            bonus = 1.0 if self.game and len(player.cat_cards) >= self.game.max_cat_limit(player) else 0.0
+            return (2.1 + bonus) * dup_penalty
+        if card.name == "Service Dawg":
+            bonus = 0.6 if max_count <= 1 and not straight_draw else 0.0
+            if penalty_next:
+                bonus += 2.2
+            return ((2.2 if behind else 1.6) + bonus) * dup_penalty
+        if card.name == "Alpha Dawg":
+            return (2.0 if behind else 1.5) * dup_penalty
+        if card.name == "Mascot Dawg":
+            return (2.2 if behind else 1.5) * dup_penalty
+        if card.name == "Golden Dawg":
+            return 1.7 * dup_penalty
+        if card.name == "Scurvy Dawg":
+            bonus = 0.4 if max_count <= 1 and not straight_draw else 0.0
+            if penalty_next:
+                bonus += 1.8
+            return ((1.2 if behind else 0.8) + bonus) * dup_penalty
+        if card.name == "Shadow Dawg":
+            return (1.6 if behind else 1.1) * dup_penalty
+        if card.name == "Bull Dawg":
+            bonus = 0.6 if max_count <= 1 and not straight_draw else 0.0
+            return (1.9 + bonus) * dup_penalty
+        if card.name == "Daredevil Dawg":
+            plus_one_cards = {
+                "Psychedelic Dawg",
+                "Reservoir Dawgs",
+                "Dawg House",
+                "Diamond Dawg",
+                "Barrel Dawg",
+                "Barrel Dog",
+                "Tri-tail Dawg",
+                "One Dawg Wolf Pack",
+            }
+            plus_one_owned = sum(1 for c in owned if c in plus_one_cards)
+            return (2.4 + 0.5 * plus_one_owned) * dup_penalty
+        if card.name == "Grudge Dawg":
+            base = 1.6 if behind else 1.1
+            return base * dup_penalty
+        if card.name == "Mythic Dawg":
+            bonus = 1.2 if max_count >= 4 else 0.0
+            base = (3.2 if behind else 2.4) + bonus
+            return base * dup_penalty
+        return 0.6 * dup_penalty
+
+    def ai_best_shop_dog(self, player: Player):
+        game = self.game
+        if not game:
+            return None
+        best = None
+        for i, card in enumerate(game.shop_dogs):
+            if not card:
+                continue
+            score = self.ai_score_dog_card(player, card)
+            if best is None or score > best[2]:
+                best = (i, card, score)
+        return best
+
+    def ai_worst_owned_dog(self, player: Player):
+        if not player.dog_cards:
+            return None
+        worst = None
+        for card in player.dog_cards:
+            score = self.ai_score_dog_card(player, card)
+            if worst is None or score < worst[2]:
+                worst = (card.name, card, score)
+        return worst
+
+    def ai_score_cat_card(self, player: Player, card: Card) -> float:
+        weights = self.ai_color_weights(player)
+        max_color_weight = max(weights.get(c, 0) for c in COLORS)
+        behind = False
+        if self.players:
+            leader_score = max(p.total_score for p in self.players)
+            behind = player.total_score < leader_score
+        threat_bonus = 0.0
+        human = self.get_human_player()
+        if human and human is not player:
+            threat_bonus = min(2.5, self.ai_threat_score(human) * 0.3)
+        human_weights = None
+        human_objective_weight = 0.0
+        human_top_weight = 0.0
+        if human and human is not player:
+            human_weights = self.ai_color_weights(human)
+            human_objective_weight = (
+                human_weights.get(human.objective_color, 0.0) if human.objective_color else 0.0
+            )
+            human_top_weight = max(human_weights.get(c, 0.0) for c in COLORS)
+        if card.name == "Stray Cat":
+            return 2.6 * max_color_weight
+        if card.name == "Bat Cat":
+            avg_weight = sum(weights.get(c, 0) for c in BASE_COLORS) / len(BASE_COLORS)
+            min_weight = min(weights.get(c, 0) for c in BASE_COLORS)
+            return max(0.2, (avg_weight - min_weight) * 3.5)
+        if card.name == "Feral Cat":
+            base = 2.2 if weights.get("purple", 0) > 0.2 else 1.0
+            if self.ai_wants_purple(player):
+                base += 1.2
+            if any(
+                c.name == "Psychedelic Dawg"
+                for c in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+            ):
+                base += 0.8
+            return base
+        if card.name == "Momma Cat":
+            return 2.0
+        if card.name == "Nimble Cat":
+            return 1.6
+        if card.name == "Devil Cat":
+            return 2.6
+        if card.name == "Starlight Cat":
+            base = 2.3
+            if weights.get("purple", 0) > 0.2:
+                base += 0.5
+            return base
+        if card.name == "Lap Cat":
+            return 1.4
+        if card.name == "Fish Bone Cat":
+            base = 1.4
+            if self.ai_wants_purple(player):
+                base += 1.2
+            if any(
+                c.name == "Psychedelic Dawg"
+                for c in (player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards)
+            ):
+                base += 0.6
+            return base
+        if card.name == "Present Cat":
+            return 2.0 if behind else 1.5
+        if card.name == "Regal Cat":
+            return max(0.8, player.kibbles / 4.0)
+        if card.name == "Tolerant Cat":
+            return 1.7
+        if card.name == "Territorial Cat":
+            base = 1.6 if behind else 1.3
+            return base + threat_bonus
+        if card.name == "Cat Burglar":
+            opponents = [
+                c
+                for p in self.players
+                if p is not player
+                for c in (p.dog_cards + p.stolen_dog_cards)
+            ]
+            if opponents:
+                best = max(self.ai_score_dog_card(player, c) for c in opponents)
+                return 0.8 + best + threat_bonus
+            return 0.4
+        if card.name == "Dogs Best Friend":
+            options = [
+                c
+                for p in self.players
+                for c in (p.dog_cards + p.stolen_dog_cards)
+            ]
+            if options:
+                best = max(self.ai_score_dog_card(player, c) for c in options)
+                return 0.7 + best
+            return 0.3
+        if card.name == "Cat Tackle":
+            base = 0.6 if behind else 0.4
+            if human_weights is not None:
+                base += 0.6 + human_objective_weight + human_top_weight * 0.5
+            return base + threat_bonus
+        if card.name == "Raccoon Cat":
+            base = 1.2 if behind else 0.8
+            if human and human is not player:
+                base += min(1.0, float(human.kibbles) / 6.0)
+            return base + threat_bonus
+        if card.name == "Narc Cat":
+            base = 1.1 if behind else 0.7
+            if human and human is not player and human.bag.counts.get("purple", 0) > 0:
+                base += 0.8
+            return base + threat_bonus
+        if card.name == "Focus Cat":
+            return 1.4 if player.objective_color else 0.6
+        if card.name == "Greedy Cat":
+            base = 1.3 if behind else 0.9
+            if human and human is not player:
+                base += 0.6
+            return base + threat_bonus
+        if card.name == "Squirrel Cat":
+            base = 1.2 if behind else 0.8
+            if human and human is not player:
+                base += 0.5
+            return base + threat_bonus
+        if card.name == "Shrodinger's Cat":
+            base = 1.6 if behind else 1.2
+            return base + threat_bonus
+        if card.name == "Thief in the Night":
+            base = 2.2 if behind else 1.5
+            if human and human is not player:
+                base += 0.7
+            return base + threat_bonus
+        if card.name == "Pummeling Puma":
+            base = 1.2 if behind else 0.8
+            if human and human is not player:
+                recent = self.get_recent_round_score(human)
+                if recent >= 5 or human.total_score >= max(p.total_score for p in self.players):
+                    base += 0.8
+            return base + threat_bonus
+        if card.name == "Void Cat":
+            base = 1.0 if behind else 0.7
+            if human and human is not player and human.cat_cards:
+                base += 0.6
+            return base + threat_bonus
+        return 0.5
+
+    def ai_choose_shop_card(self, player: Player):
+        game = self.game
+        if not game:
+            return None
+        self.pending_ai_shop_toast = None
+        dog_options = []
+        for i, card in enumerate(game.shop_dogs):
+            if not card:
+                continue
+            if game.can_buy(player, card, replace_dog=True):
+                dog_options.append(("dog", i, card))
+        cat_options = []
+        for i, card in enumerate(game.shop_cats):
+            if not card:
+                continue
+            if game.can_buy(player, card, replace_cat=True):
+                cat_options.append(("cat", i, card))
+        if not dog_options and not cat_options:
+            return None
+        human = self.get_human_player()
+        if human and human is not player:
+            threshold = self.ai_denial_threshold(human) + 0.9
+            best_deny = None
+            for kind, index, card in dog_options:
+                deny_score = self.ai_deny_score_for_human(card)
+                if deny_score >= threshold and (
+                    best_deny is None or deny_score > best_deny[4]
+                ):
+                    replace_dog = None
+                    if len(player.dog_cards) >= game.max_dog_cards:
+                        worst = self.ai_worst_owned_dog(player)
+                        replace_dog = worst[1] if worst else player.dog_cards[0]
+                    best_deny = (kind, index, card, replace_dog, deny_score)
+            if best_deny:
+                kind, index, card, replace_dog, _score = best_deny
+                reason = self.ai_denial_reason_text(card, human)
+                self.pending_ai_shop_toast = (
+                    player,
+                    f"{player.name} bought {card.name} to {reason}.",
+                )
+                return (kind, index, card, None, replace_dog)
+        penalty_next = (
+            player.pending_roll_penalty > 0
+            and player.pending_roll_penalty_round == game.round_num + 1
+        )
+        if penalty_next:
+            priority = [
+                opt
+                for opt in dog_options
+                if opt[2].name in ("Service Dawg", "Scurvy Dawg")
+            ]
+            if priority:
+                kind, index, card = max(
+                    priority, key=lambda opt: self.ai_score_dog_card(player, opt[2])
+                )
+                replace_cat = None
+                replace_dog = None
+                if len(player.dog_cards) >= game.max_dog_cards:
+                    worst = self.ai_worst_owned_dog(player)
+                    replace_dog = worst[1] if worst else player.dog_cards[0]
+                return (kind, index, card, replace_cat, replace_dog)
+
+        def score_option(kind: str, card: Card) -> float:
+            if kind == "dog":
+                base = self.ai_score_dog_card(player, card)
+                human = self.get_human_player()
+                if human and human is not player:
+                    deny_score = self.ai_deny_score_for_human(card)
+                    if deny_score >= self.ai_denial_threshold(human):
+                        threat = self.ai_threat_score(human)
+                        denial_weight = 0.6 + min(0.8, threat * 0.06)
+                        base += deny_score * denial_weight
+                if len(player.dog_cards) < game.max_dog_cards:
+                    base += 0.6
+                return base + self.ai_shop_memory_bonus(card)
+            return self.ai_score_cat_card(player, card) + self.ai_shop_memory_bonus(card)
+
+        best = None
+        best_score = -1.0
+        options = dog_options + cat_options
+        for kind, index, card in options:
+            score = score_option(kind, card)
+            if kind == "dog" and len(player.dog_cards) < game.max_dog_cards:
+                score += 0.8
+            if kind == "cat" and len(player.dog_cards) < game.max_dog_cards:
+                score -= 0.6
+            if score > best_score:
+                best_score = score
+                replace_cat = None
+                if kind == "cat" and len(player.cat_cards) >= game.max_cat_limit(player):
+                    preferred_colors = set()
+                    if player.objective_color:
+                        preferred_colors.add(player.objective_color)
+                    for dog in player.dog_cards + player.stolen_dog_cards:
+                        if dog.name == "Psychedelic Dawg":
+                            preferred_colors.add("purple")
+                    if not preferred_colors:
+                        bat = next((c for c in player.cat_cards if c.name == "Bat Cat"), None)
+                        replace_cat = bat if bat else player.cat_cards[0]
+                    else:
+                        replace_cat = player.cat_cards[0]
+                replace_dog = None
+                if kind == "dog" and len(player.dog_cards) >= game.max_dog_cards:
+                    worst = self.ai_worst_owned_dog(player)
+                    replace_dog = worst[1] if worst else player.dog_cards[0]
+                best = (kind, index, card, replace_cat, replace_dog)
+        if best and best_score < 1.6 and self.in_shop:
+            try:
+                player_idx = self.players.index(player)
+            except ValueError:
+                player_idx = -1
+            limit = self.get_shop_purchase_limit(player)
+            purchases = (
+                self.shop_purchase_counts[player_idx]
+                if 0 <= player_idx < len(self.shop_purchase_counts)
+                else limit
+            )
+            if purchases <= max(0, limit - 2):
+                if self.ai_has_high_value_memory(player, "dog") or self.ai_has_high_value_memory(player, "cat"):
+                    return None
+        return best
+
+    def sell_dog_card_for_ai(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        if card not in player.dog_cards:
+            return
+        player.dog_cards.remove(card)
+        player.kibbles += 2
+        game.dog_deck.add(card)
+        self.add_log(f"{player.name} sold {card.name} for 2 kibbles.")
+
+    def add_log(self, message: str) -> None:
+        lines = [line for line in message.splitlines() if line.strip()]
+        for line in reversed(lines):
+            self.log_history.insert(0, line)
+        if hasattr(self, "log_text") and self.log_text.winfo_exists():
+            self.log_text.configure(state="normal")
+            self.log_text.insert("1.0", message + "\n", "log")
+            self.log_text.see("1.0")
+        self.refresh_log_window()
+        if self.log_panel_visible:
+            self.refresh_log_panel()
+
+    def get_log_text(self) -> str:
+        if hasattr(self, "log_text") and self.log_text.winfo_exists():
+            content = self.log_text.get("1.0", "end").strip()
+            if content:
+                return content
+        return "\n".join(self.log_history).strip()
+
+    def ensure_log_history(self) -> None:
+        if self.log_history:
+            return
+        if not hasattr(self, "log_text"):
+            return
+        content = self.log_text.get("1.0", "end").strip()
+        if not content:
+            return
+        self.log_history = [line for line in content.splitlines() if line.strip()]
+
+    def refresh_log_window(self) -> None:
+        if not self.log_window_text or not self.log_window_text.winfo_exists():
+            return
+        self.log_window_text.configure(state="normal")
+        self.log_window_text.delete("1.0", "end")
+        log_contents = self.get_log_text()
+        if log_contents:
+            self.log_window_text.insert("end", log_contents + "\n", "log")
+        else:
+            self.log_window_text.insert("end", "No log entries yet.\n", "log")
+
+    def build_log_panel(self) -> None:
+        if not hasattr(self, "log_panel_container"):
+            return
+        self.log_panel_frame = tk.Frame(self.log_panel_container, bg=self.theme["panel_dark"])
+        tk.Label(
+            self.log_panel_frame,
+            text="Game Log",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", pady=(2, 6))
+        self.log_panel_text = tk.Text(
+            self.log_panel_frame,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+        )
+        self.log_panel_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.log_panel_text.tag_configure("log", foreground=self.theme["text"])
+        self.make_text_readonly(self.log_panel_text)
+        self.log_panel_frame.pack(fill="both", expand=True)
+
+    def refresh_log_panel(self) -> None:
+        if not self.log_panel_visible:
+            return
+        if not self.log_panel_text or not self.log_panel_text.winfo_exists():
+            self.build_log_panel()
+            if not self.log_panel_text:
+                return
+        self.log_panel_text.configure(state="normal")
+        self.log_panel_text.delete("1.0", "end")
+        log_contents = self.get_log_text()
+        if log_contents:
+            self.log_panel_text.insert("end", log_contents + "\n", "log")
+
+    def init_audio(self) -> None:
+        try:
+            pygame.mixer.init()
+            self.audio_ready = True
+        except Exception:
+            self.audio_ready = False
+
+    def load_sound(self, relative_path: str):
+        if not self.audio_ready:
+            return None
+        path = self.resource_path(relative_path)
+        if not os.path.exists(path):
+            return None
+        try:
+            return pygame.mixer.Sound(path)
+        except Exception:
+            return None
+
+    def play_sound(self, sound, loop: bool = False, volume_scale: float = 1.0):
+        if self.mute_var.get():
+            return None
+        if not self.audio_ready or not sound:
+            return None
+        volume = float(self.volume_var.get() / 100) * volume_scale
+        try:
+            sound.set_volume(max(0.0, min(1.0, volume)))
+        except Exception:
+            pass
+        loops = -1 if loop else 0
+        try:
+            return sound.play(loops=loops)
+        except Exception:
+            return None
+
+    def handle_ui_click_sound(self, event) -> None:
+        if not getattr(self, "audio_ready", False) or not getattr(self, "click_sound", None):
+            return
+        mute_var = getattr(self, "mute_var", None)
+        if mute_var is not None and mute_var.get():
+            return
+        try:
+            widget = event.widget
+            cls = widget.winfo_class()
+            if cls in ("Button", "TButton", "Checkbutton", "TCheckbutton"):
+                self.play_sound(self.click_sound)
+                return
+            cursor = ""
+            try:
+                cursor = widget.cget("cursor")
+            except Exception:
+                cursor = ""
+            if cursor == "hand2":
+                self.play_sound(self.click_sound)
+        except Exception:
+            return
+
+    def handle_dogs_best_friend_global_click(self, event) -> str | None:
+        if not self.dogs_best_friend_active or self.dogs_best_friend_player is None:
+            return None
+        widget = getattr(event, "widget", None)
+        for _ in range(5):
+            if widget is None:
+                break
+            if not getattr(widget, "is_card_widget", False):
+                widget = getattr(widget, "master", None)
+                continue
+            card = getattr(widget, "card_ref", None)
+            if isinstance(card, Card) and card.kind == "cat" and card.name == "Dogs Best Friend":
+                if (
+                    widget.card_owner is self.dogs_best_friend_player
+                    and not self.dogs_best_friend_ignore_cancel
+                ):
+                    self.cancel_dogs_best_friend()
+                    self.show_toast("Dawg selector cancelled.")
+                    return "break"
+            card = getattr(widget, "card_ref", None)
+            if isinstance(card, Card) and card.kind == "dog":
+                owner = getattr(widget, "card_owner", None) or self.dogs_best_friend_player
+                if owner is self.dogs_best_friend_player:
+                    if self.confirm_dogs_best_friend_from_inventory(owner, card):
+                        return "break"
+            card_name = getattr(widget, "card_name", None)
+            if card_name:
+                player = self.dogs_best_friend_player
+                owned = player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards
+                match = next((c for c in owned if c.name == card_name), None)
+                if match:
+                    if self.confirm_dogs_best_friend_from_inventory(player, match):
+                        return "break"
+            widget = getattr(widget, "master", None)
+        x_root = getattr(event, "x_root", None)
+        y_root = getattr(event, "y_root", None)
+        if x_root is not None and y_root is not None:
+            for widget, card, owner in list(self.dog_card_widgets):
+                if not widget.winfo_exists():
+                    continue
+                try:
+                    wx = widget.winfo_rootx()
+                    wy = widget.winfo_rooty()
+                    ww = widget.winfo_width()
+                    wh = widget.winfo_height()
+                except tk.TclError:
+                    continue
+                if wx <= x_root <= wx + ww and wy <= y_root <= wy + wh:
+                    if owner is self.dogs_best_friend_player:
+                        if self.confirm_dogs_best_friend_from_inventory(owner, card):
+                            return "break"
+        return None
+
+    def start_roll_sound(self) -> None:
+        if self.mute_var.get():
+            return
+        if self.roll_sound_active and self.roll_channel:
+            return
+        self.roll_sound_active = True
+        self.roll_channel = self.play_sound(self.roll_sound, loop=True)
+        if not self.roll_channel:
+            self.roll_sound_active = False
+
+    def stop_roll_sound(self) -> None:
+        if not self.roll_sound_active:
+            return
+        self.roll_sound_active = False
+        if self.roll_channel:
+            self.roll_channel.stop()
+            self.roll_channel = None
+
+    def start_shop_sound(self) -> None:
+        if self.mute_var.get():
+            return
+        if self.main_theme_active:
+            self.stop_main_theme()
+        if self.shop_sound_active and self.shop_channel:
+            return
+        self.shop_sound_active = True
+        self.shop_channel = self.play_sound(self.shop_sound, loop=True)
+        if not self.shop_channel:
+            self.shop_sound_active = False
+
+    def stop_shop_sound(self) -> None:
+        if not self.shop_sound_active:
+            return
+        self.shop_sound_active = False
+        if self.shop_channel:
+            self.shop_channel.stop()
+            self.shop_channel = None
+
+    def start_main_theme(self) -> None:
+        if self.mute_var.get():
+            return
+        if self.shop_sound_active:
+            self.stop_shop_sound()
+        if self.main_theme_active and self.main_theme_channel:
+            return
+        self.main_theme_active = True
+        self.main_theme_channel = self.play_sound(
+            self.main_theme_sound,
+            loop=True,
+            volume_scale=self.main_theme_volume_scale,
+        )
+        if not self.main_theme_channel:
+            self.main_theme_active = False
+
+    def stop_main_theme(self) -> None:
+        if not self.main_theme_active:
+            return
+        self.main_theme_active = False
+        if self.main_theme_channel:
+            self.main_theme_channel.stop()
+            self.main_theme_channel = None
+
+    def start_shop_header_flash(self) -> None:
+        if not self.shop_header_label:
+            return
+        colors = ["#ff4d4d", "#ff9f1a", "#ffd633", "#33cc33", "#3399ff", "#8e5cff"]
+
+        def step(i: int) -> None:
+            if not self.shop_header_label or not self.shop_layout_active:
+                return
+            if not self.shop_header_label.winfo_exists():
+                self.shop_header_label = None
+                return
+            self.shop_header_label.config(fg=colors[i % len(colors)])
+            self.shop_header_job = self.root.after(180, lambda: step(i + 1))
+
+        if self.shop_header_job:
+            self.root.after_cancel(self.shop_header_job)
+        step(0)
+
+    def stop_shop_header_flash(self) -> None:
+        if self.shop_header_job:
+            self.root.after_cancel(self.shop_header_job)
+            self.shop_header_job = None
+        if self.shop_header_label and self.shop_header_label.winfo_exists():
+            try:
+                self.shop_header_label.config(fg=self.theme["text"])
+            except tk.TclError:
+                pass
+        self.shop_header_label = None
+
+    def start_jumble_sound(self) -> None:
+        if self.mute_var.get():
+            return
+        if self.jumble_sound_active and self.jumble_channel:
+            return
+        self.jumble_sound_active = True
+        self.jumble_channel = self.play_sound(self.leather_sound, loop=True)
+        if not self.jumble_channel:
+            self.jumble_sound_active = False
+
+    def stop_jumble_sound(self) -> None:
+        if not self.jumble_sound_active:
+            return
+        self.jumble_sound_active = False
+        if self.jumble_channel:
+            self.jumble_channel.stop()
+            self.jumble_channel = None
+
+    def on_toggle_mute(self) -> None:
+        if self.mute_var.get():
+            self.stop_roll_sound()
+            self.stop_shop_sound()
+            self.stop_jumble_sound()
+            self.stop_main_theme()
+        else:
+            self.apply_volume()
+            if self.in_shop:
+                self.start_shop_sound()
+            if self.rolling_active:
+                self.start_roll_sound()
+            if self.setup_frame and self.setup_frame.winfo_exists():
+                self.start_main_theme()
+
+    def on_volume_change(self, _value=None) -> None:
+        self.apply_volume()
+
+    def apply_volume(self) -> None:
+        volume = float(self.volume_var.get() / 100)
+        volume = max(0.0, min(1.0, volume))
+        for sound in (
+            self.flip_sound,
+            self.leather_sound,
+            self.roll_sound,
+            self.shop_sound,
+            self.achievement_sound,
+            self.victory_sound,
+            self.click_sound,
+            self.main_theme_sound,
+            self.drop_sound,
+        ):
+            if sound:
+                try:
+                    if sound is self.main_theme_sound:
+                        sound.set_volume(max(0.0, min(1.0, volume * self.main_theme_volume_scale)))
+                    else:
+                        sound.set_volume(volume)
+                except Exception:
+                    pass
+        for channel in (
+            self.roll_channel,
+            self.shop_channel,
+            self.jumble_channel,
+            self.main_theme_channel,
+        ):
+            if channel:
+                try:
+                    if channel is self.main_theme_channel:
+                        channel.set_volume(max(0.0, min(1.0, volume * self.main_theme_volume_scale)))
+                    else:
+                        channel.set_volume(volume)
+                except Exception:
+                    pass
+
+    def on_toggle_speed(self) -> None:
+        if self.speed_var.get() and self.rolling_active:
+            self.finish_roll_animation()
+
+    def on_toggle_debug(self) -> None:
+        if not self.debug_enabled:
+            self.debug_var.set(False)
+            self.layout_debug_var.set(False)
+            self.layout_debug_enabled = False
+            self.clear_layout_debug_overlay()
+            if self.debug_window and self.debug_window.winfo_exists():
+                self.debug_window.destroy()
+                self.debug_window = None
+            return
+        if self.debug_var.get():
+            self.open_debug_window()
+        else:
+            self.layout_debug_var.set(False)
+            self.layout_debug_enabled = False
+            self.clear_layout_debug_overlay()
+            if self.debug_window and self.debug_window.winfo_exists():
+                self.debug_window.destroy()
+                self.debug_window = None
+
+    def open_debug_window(self) -> None:
+        if not self.debug_enabled:
+            return
+        if self.debug_window and self.debug_window.winfo_exists():
+            self.debug_window.lift()
+            if self.layout_debug_var.get():
+                self.schedule_layout_debug_refresh()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Debug")
+        window.configure(bg=self.theme["panel_dark"])
+        self.set_screen_safe_geometry(window, 340, 520, x=10, y=50)
+        self.debug_window = window
+
+        tk.Label(
+            window,
+            text="Debug Tools",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", padx=10, pady=(10, 6))
+
+        self.debug_ignore_var = tk.BooleanVar(value=self.debug_ignore_limits)
+        tk.Checkbutton(
+            window,
+            text="Ignore cat/dog limits",
+            variable=self.debug_ignore_var,
+            command=self.on_toggle_ignore_limits,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["panel_dark"],
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+        tk.Checkbutton(
+            window,
+            text="Layout audit overlay",
+            variable=self.layout_debug_var,
+            command=self.on_toggle_layout_debug_overlay,
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+            selectcolor=self.theme["panel"],
+            activebackground=self.theme["panel_dark"],
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+        tk.Button(
+            window,
+            text="Refresh layout overlay",
+            command=self.refresh_layout_debug_overlay,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+        tk.Button(
+            window,
+            text="Unlock random achievement",
+            command=self.debug_unlock_random_achievement,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Open cat picker",
+            command=lambda: self.open_debug_card_picker("cat"),
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Open dog picker",
+            command=lambda: self.open_debug_card_picker("dog"),
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Cat action check",
+            command=self.debug_check_cat_actions,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Reduce bag to objective dice",
+            command=self.debug_reduce_bag_to_objective,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Reduce bag to purple dice",
+            command=self.debug_reduce_bag_to_purple,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Give 20 kibble (Player 1)",
+            command=self.debug_give_kibble,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Add 20 score (Player 1)",
+            command=self.debug_add_score,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Auto skip to shop",
+            command=self.debug_skip_to_shop,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Label(
+            window,
+            text="Roll Theme Depth",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        depth_options = ["Game"] + [str(i) for i in range(0, 13)]
+        self.debug_depth_var = tk.StringVar(value="Game")
+        tk.OptionMenu(window, self.debug_depth_var, *depth_options).pack(
+            fill="x", padx=10, pady=(0, 8)
+        )
+        self.debug_depth_var.trace_add("write", lambda *_: self.debug_set_depth_theme())
+        tk.Button(
+            window,
+            text="Auto skip to next round",
+            command=self.debug_skip_to_next_round,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Show end game results",
+            command=self.debug_show_end_game,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Show card unlock toast",
+            command=self.debug_show_card_unlock_toast,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        tk.Button(
+            window,
+            text="Roll credits",
+            command=self.debug_show_credits,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+        def on_close() -> None:
+            self.debug_var.set(False)
+            self.layout_debug_var.set(False)
+            self.layout_debug_enabled = False
+            self.clear_layout_debug_overlay()
+            window.destroy()
+            self.debug_window = None
+
+        window.protocol("WM_DELETE_WINDOW", on_close)
+
+    def on_toggle_ignore_limits(self) -> None:
+        self.debug_ignore_limits = bool(self.debug_ignore_var.get())
+
+    def on_toggle_layout_debug_overlay(self) -> None:
+        self.layout_debug_enabled = bool(self.layout_debug_var.get())
+        if self.layout_debug_enabled:
+            self.schedule_layout_debug_refresh()
+        else:
+            self.clear_layout_debug_overlay()
+
+    def debug_set_depth_theme(self) -> None:
+        selection = self.debug_depth_var.get() if hasattr(self, "debug_depth_var") else "Game"
+        if not selection or selection.lower() == "game":
+            self.debug_theme_depth = None
+            self.depth_theme_enabled = False
+        else:
+            try:
+                self.debug_theme_depth = int(selection)
+            except ValueError:
+                self.debug_theme_depth = None
+            self.depth_theme_enabled = True
+        frame = getattr(self, "center_frame", None)
+        if frame is not None and frame.winfo_exists():
+            self.apply_roll_phase_theme()
+
+    def debug_unlock_random_achievement(self) -> None:
+        if not self.profile_data:
+            self.add_log("Debug: load or create a profile to unlock achievements.")
+            messagebox.showinfo(
+                "No Profile",
+                "Load or create a profile to unlock achievements.",
+                parent=self.root,
+            )
+            return
+        achieved = set(self.profile_data.get("achievements", []))
+        locked = [a for a in self.achievement_list if a not in achieved]
+        if not locked:
+            return
+        self.root.lift()
+        self.unlock_achievement(random.choice(locked))
+
+    def debug_check_cat_actions(self) -> None:
+        try:
+            source = inspect.getsource(self.use_cat_card)
+        except OSError:
+            self.add_log("Cat action check unavailable.")
+            return
+        cat_names = sorted({card.name for card in build_cat_cards()})
+        missing = [name for name in cat_names if f'card.name == "{name}"' not in source]
+        if missing:
+            self.add_log("[CatAction] Missing handlers: " + ", ".join(missing))
+        else:
+            self.add_log("[CatAction] All cat cards have handlers.")
+
+    def open_debug_card_picker(self, kind: str) -> None:
+        if kind not in ("cat", "dog"):
+            return
+        if not self.players:
+            messagebox.showinfo(
+                "No Game",
+                "Start a game before adding cards.",
+                parent=self.root,
+            )
+            return
+        existing = self.debug_picker_windows.get(kind)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title(f"Debug {kind.title()} Picker")
+        window.configure(bg=self.theme["panel_dark"])
+        self.set_screen_safe_geometry(window, 560, 420, x=340, y=80)
+        self.debug_picker_windows[kind] = window
+
+        header = tk.Frame(window, bg=self.theme["panel_dark"])
+        header.pack(fill="x", padx=10, pady=(10, 6))
+        tk.Label(
+            header,
+            text=f"Select a {kind} card to add for free",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        player_names = [p.name for p in self.players] or ["Player 1"]
+        target_var = tk.StringVar(value=player_names[0])
+        self.debug_picker_target_vars[kind] = target_var
+        tk.OptionMenu(header, target_var, *player_names).pack(side="left", padx=10)
+        close_img = self.ui_images.get("close")
+        close_btn = tk.Button(
+            header,
+            text="Close" if not close_img else "",
+            image=close_img,
+            command=window.destroy,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=8,
+            pady=2,
+        )
+        if close_img:
+            close_btn.image = close_img
+        close_btn.pack(side="right")
+
+        body = tk.Frame(window, bg=self.theme["panel_dark"])
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(body, bg=self.theme["panel_dark"], highlightthickness=0)
+        scrollbar = tk.Scrollbar(body, orient="vertical", command=canvas.yview, width=16)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        inner = tk.Frame(canvas, bg=self.theme["panel_dark"])
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        cards = build_cat_cards() if kind == "cat" else build_dog_cards()
+        unique_cards: list[Card] = []
+        seen = set()
+        for card in cards:
+            if card.name in seen:
+                continue
+            seen.add(card.name)
+            unique_cards.append(card)
+
+        columns = 4
+        for idx, card in enumerate(unique_cards):
+            row = idx // columns
+            col = idx % columns
+            cell = tk.Frame(inner, bg=self.theme["panel_dark"])
+            cell.grid(row=row, column=col, padx=6, pady=6)
+            img = self.get_card_image(card)
+            if img:
+                btn = tk.Button(
+                    cell,
+                    image=img,
+                    command=lambda c=card, k=kind: self.debug_add_card_to_player(c, k),
+                    bg=self.theme["panel_dark"],
+                    activebackground=self.theme["panel_dark"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    cell,
+                    text=card.name,
+                    command=lambda c=card, k=kind: self.debug_add_card_to_player(c, k),
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=6,
+                    pady=4,
+                    wraplength=120,
+                )
+            btn.pack()
+            self.attach_card_tooltip(btn, card)
+
+        def on_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", on_configure)
+
+        def on_close() -> None:
+            window.destroy()
+            if self.debug_picker_windows.get(kind) is window:
+                self.debug_picker_windows.pop(kind, None)
+            if self.debug_picker_target_vars.get(kind) is target_var:
+                self.debug_picker_target_vars.pop(kind, None)
+
+        window.protocol("WM_DELETE_WINDOW", on_close)
+
+    def debug_add_card_to_player(self, card: Card, kind: str) -> None:
+        if not self.players:
+            return
+        target_var = self.debug_picker_target_vars.get(kind)
+        target_name = target_var.get() if target_var else None
+        player = next((p for p in self.players if p.name == target_name), self.players[0])
+        new_card = Card(card.name, card.kind, card.cost, dict(card.effect), card.description)
+        if new_card.kind == "cat":
+            player.cat_cards.append(new_card)
+        else:
+            player.dog_cards.append(new_card)
+        self.add_log(f"Debug: added {new_card.name} to {player.name}.")
+        self.update_table_view()
+        self.update_status()
+
+    def debug_give_kibble(self) -> None:
+        if not self.players:
+            return
+        self.players[0].kibbles += 20
+        self.update_table_view()
+        self.update_status()
+
+    def debug_add_score(self) -> None:
+        if not self.players:
+            return
+        player = self.players[0]
+        player.total_score += 20
+        self.add_log(f"Debug: added 20 score to {player.name}.")
+        self.update_table_view()
+        self.update_status()
+
+    def debug_reduce_bag_to_objective(self) -> None:
+        if not self.players:
+            return
+        player = self.players[0]
+        color = player.objective_color
+        if not color:
+            self.add_log("Debug: no objective color set for player.")
+            return
+        for c in COLORS:
+            player.bag.counts[c] = 0
+        player.bag.counts[color] = 20
+        self.add_log(f"Debug: {player.name} bag set to all {color} dice.")
+        self.update_table_view()
+        self.update_status()
+
+    def debug_reduce_bag_to_purple(self) -> None:
+        if not self.players:
+            return
+        player = self.players[0]
+        for c in COLORS:
+            player.bag.counts[c] = 0
+        player.bag.counts["purple"] = 20
+        self.add_log(f"Debug: {player.name} bag set to all purple dice.")
+        self.update_table_view()
+        self.update_status()
+
+    def debug_skip_to_shop(self) -> None:
+        if self.in_shop or not self.game:
+            return
+        self.add_log("Debug: skipping to shop.")
+        self.finish_round()
+
+    def debug_skip_to_next_round(self) -> None:
+        if not self.game:
+            return
+        if self.in_shop:
+            self.add_log("Debug: skipping to next round.")
+            self.advance_round()
+
+    def debug_show_end_game(self) -> None:
+        if not self.players:
+            return
+        self.end_game()
+
+    def debug_show_credits(self) -> None:
+        self.show_final_credits_screen()
+
+    def debug_show_card_unlock_toast(self) -> None:
+        card = self.find_card_definition("Feral Cat", "cat")
+        if not card:
+            self.show_toast("Card not found.")
+            return
+        self.show_card_unlock_toast(card, "Feral Cat unlocked!")
+
+    def show_log_window(self) -> None:
+        if self.log_window and self.log_window.winfo_exists():
+            self.log_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Game Log")
+        window.configure(bg=self.theme["panel_dark"])
+        self.set_screen_safe_geometry(window, 700, 600, x=80, y=50)
+        self.log_window = window
+
+        body = tk.Frame(window, bg=self.theme["panel_dark"])
+        body.pack(fill="both", expand=True, padx=8, pady=8)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        scrollbar = tk.Scrollbar(
+            body,
+            orient="vertical",
+            width=0,
+            bg=self.theme["bg"],
+            troughcolor=self.theme["bg"],
+            activebackground=self.theme["bg"],
+            highlightbackground=self.theme["bg"],
+            relief="flat",
+            borderwidth=0,
+        )
+        text = tk.Text(
+            body,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            yscrollcommand=scrollbar.set,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        scrollbar.config(command=text.yview)
+        text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.log_window_text = text
+        self.log_window_text.tag_configure("log", foreground=self.theme["text"])
+        self.make_text_readonly(self.log_window_text)
+        log_contents = self.get_log_text()
+        if log_contents:
+            self.log_window_text.insert("end", log_contents + "\n", "log")
+        else:
+            self.log_window_text.insert("end", "No log entries yet.\n", "log")
+        self.refresh_log_window()
+        self.root.after(50, self.refresh_log_window)
+
+        def on_close() -> None:
+            self.log_window = None
+            self.log_window_text = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", on_close)
+
+    def toggle_game_log_panel(self) -> None:
+        if not self.compact_player_panels:
+            self.show_log_window()
+            return
+        if not hasattr(self, "log_panel_container"):
+            self.show_log_window()
+            return
+        if self.log_panel_visible:
+            self.log_panel_visible = False
+            if self.log_panel_frame and self.log_panel_frame.winfo_exists():
+                self.log_panel_frame.destroy()
+                self.log_panel_frame = None
+                self.log_panel_text = None
+            if not self.scorecard_panel_visible:
+                self.log_panel_container.grid_remove()
+                self.update_bottom_panel_layout()
+            return
+        for widget in self.log_panel_container.winfo_children():
+            widget.destroy()
+        self.scorecard_panel_visible = False
+        self.build_log_panel()
+        self.refresh_log_panel()
+        self.log_panel_container.grid()
+        self.log_panel_visible = True
+        self.update_bottom_panel_layout()
+
+    def format_game_depth(self, depth: int) -> str:
+        if depth <= 0:
+            return "New Game"
+        return f"New Game +{depth}"
+
+    def get_booster_gates(self) -> dict:
+        return {
+            "rivalry_booster": {
+                "cats": {
+                    "Cat Tackle",
+                    "Raccoon Cat",
+                    "Greedy Cat",
+                },
+                "dogs": {
+                    "Golden Dawg",
+                    "Shadow Dawg",
+                    "Cats Best Friend",
+                    "Alpha Dawg",
+                },
+            },
+            "service_booster": {
+                "cats": {
+                    "Focus Cat",
+                    "Pummeling Puma",
+                    "Void Cat",
+                },
+                "dogs": {"Service Dawg", "Scurvy Dawg", "Mascot Dawg", "Psychedelic Dawg"},
+            },
+            "trickster_booster": {
+                "cats": {
+                    "Dogs Best Friend",
+                    "Lion Cut Cat",
+                    "Fish Bone Cat",
+                    "Narc Cat",
+                },
+                "dogs": {
+                    "Barrel Dawg",
+                    "Bull Dawg",
+                    "Tri-tail Dawg",
+                },
+            },
+        }
+
+    def is_booster_owned(self, key: str) -> bool:
+        if not self.profile_data:
+            return False
+        boosters = self.profile_data.get("boosters", {})
+        return bool(boosters.get(key, False))
+
+    def is_booster_complete(self, key: str) -> bool:
+        gates = self.get_booster_gates().get(key, {})
+        cats = gates.get("cats", set())
+        dogs = gates.get("dogs", set())
+        if not cats and not dogs:
+            return True
+        unlocked = self.get_unlocked_cards()
+        return cats.issubset(unlocked["cat"]) and dogs.issubset(unlocked["dog"])
+
+    def is_booster_effectively_owned(self, key: str) -> bool:
+        return self.is_booster_owned(key) or self.is_booster_complete(key)
+
+    def purchase_booster_pack(self, key: str) -> None:
+        if not self.profile_data:
+            self.show_toast("Load a profile to buy boosters.")
+            return
+        if self.is_booster_effectively_owned(key):
+            self.show_toast("Booster already owned.")
+            return
+        cost = 75
+        banked = int(self.profile_data.get("banked_kibbles", 0))
+        if banked < cost:
+            self.show_toast("Not enough banked kibbles.")
+            return
+        self.profile_data["banked_kibbles"] = banked - cost
+        boosters = self.profile_data.setdefault("boosters", {})
+        boosters[key] = True
+        self.save_profile()
+        if self.card_shop_frame and self.card_shop_frame.winfo_exists():
+            self.card_shop_frame.destroy()
+        self.show_toast("Booster purchased!")
+        self.open_card_shop_screen()
+
+    def get_unlocked_cards(self) -> dict:
+        if not self.profile_data:
+            return {"cat": set(), "dog": set()}
+        unlocked = self.profile_data.get("unlocked_cards", {})
+        cats = set(unlocked.get("cats", []))
+        dogs = set(unlocked.get("dogs", []))
+        return {"cat": cats, "dog": dogs}
+
+    def set_card_shop_booster(self, key: str) -> None:
+        if self.is_booster_complete(key):
+            self.show_toast("Booster fully unlocked.")
+            return
+        self.card_shop_selected_booster = key
+        self.render_card_shop_picker()
+
+    def render_card_shop_picker(self) -> None:
+        frame = self.card_shop_picker_frame
+        if not frame or not frame.winfo_exists():
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        if not self.card_shop_selected_booster:
+            tk.Label(
+                frame,
+                text="Select a booster pack to view individual cards (15 kibbles each).",
+                font=self.theme["body_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["muted"],
+            ).pack()
+            return
+        gates = self.get_booster_gates().get(self.card_shop_selected_booster, {})
+        cat_names = list(gates.get("cats", set()))
+        dog_names = list(gates.get("dogs", set()))
+        if self.is_booster_complete(self.card_shop_selected_booster):
+            tk.Label(
+                frame,
+                text="All cards from this booster are already unlocked.",
+                font=self.theme["body_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["muted"],
+            ).pack()
+            return
+        if not cat_names and not dog_names:
+            tk.Label(
+                frame,
+                text="No cards in this booster.",
+                font=self.theme["body_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["muted"],
+            ).pack()
+            return
+        all_cats = {c.name: c for c in build_cat_cards()}
+        all_dogs = {c.name: c for c in build_dog_cards()}
+        cat_counts = {}
+        for c in build_cat_cards():
+            cat_counts[c.name] = cat_counts.get(c.name, 0) + 1
+        dog_counts = {}
+        for d in build_dog_cards():
+            dog_counts[d.name] = dog_counts.get(d.name, 0) + 1
+        cards: list[Card] = []
+        for name in sorted(cat_names):
+            if name in all_cats:
+                cards.append(all_cats[name])
+        for name in sorted(dog_names):
+            if name in all_dogs:
+                cards.append(all_dogs[name])
+        unlocked = self.get_unlocked_cards()
+        owned_booster = self.is_booster_effectively_owned(self.card_shop_selected_booster)
+        banked = int(self.profile_data.get("banked_kibbles", 0)) if self.profile_data else 0
+
+        row = tk.Frame(frame, bg=self.theme["bg"])
+        row.pack(anchor="center")
+        columns = min(6, max(1, len(cards)))
+        for idx, card in enumerate(cards):
+            cell = tk.Frame(row, bg=self.theme["bg"])
+            cell.grid(row=idx // columns, column=idx % columns, padx=8, pady=6)
+            is_unlocked = owned_booster or card.name in unlocked.get(card.kind, set())
+            img = (
+                self.get_picker_card_image_gray(card)
+                if is_unlocked
+                else self.get_picker_card_image(card)
+            )
+            count = cat_counts.get(card.name, dog_counts.get(card.name, 1))
+            tk.Label(
+                cell,
+                text=f"x{count}",
+                font=self.theme["small_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["muted"],
+            ).pack(pady=(0, 2))
+            if img:
+                btn = tk.Button(
+                    cell,
+                    image=img,
+                    command=lambda c=card: self.purchase_single_card_unlock(c),
+                    bg=self.theme["bg"],
+                    activebackground=self.theme["bg"],
+                    relief="flat",
+                    borderwidth=0,
+                    state="disabled" if is_unlocked else "normal",
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    cell,
+                    text=card.name,
+                    command=lambda c=card: self.purchase_single_card_unlock(c),
+                    font=self.theme["small_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=6,
+                    pady=4,
+                    state="disabled" if is_unlocked else "normal",
+                )
+            btn.pack()
+            self.attach_card_tooltip(btn, card)
+            state_text = "Unlocked" if is_unlocked else ("15 kibbles" if banked >= 15 else "Need 15")
+            tk.Label(
+                cell,
+                text=state_text,
+                font=self.theme["small_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["muted"],
+            ).pack(pady=(2, 0))
+
+    def purchase_single_card_unlock(self, card: Card) -> None:
+        if not self.profile_data:
+            self.show_toast("Load a profile to unlock cards.")
+            return
+        unlocked = self.profile_data.setdefault("unlocked_cards", {"cats": [], "dogs": []})
+        kind_key = "cats" if card.kind == "cat" else "dogs"
+        if card.name in unlocked.get(kind_key, []):
+            self.show_toast("Card already unlocked.")
+            return
+        banked = int(self.profile_data.get("banked_kibbles", 0))
+        if banked < 15:
+            self.show_toast("Not enough banked kibbles.")
+            return
+        unlocked.setdefault(kind_key, []).append(card.name)
+        self.profile_data["banked_kibbles"] = banked - 15
+        self.save_profile()
+        if self.card_shop_bank_label and self.card_shop_bank_label.winfo_exists():
+            self.card_shop_bank_label.config(
+                text=f"Banked kibbles: {self.profile_data.get('banked_kibbles', 0)}"
+            )
+        self.render_card_shop_picker()
+        self.show_card_unlock_toast(card, f"Unlocked {card.name}!")
+
+    def show_profile_window(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Profile")
+        window.configure(bg=self.theme["panel_dark"])
+        self.set_screen_safe_geometry(window, 700, 600, x=120, y=50)
+
+        body = tk.Frame(window, bg=self.theme["panel_dark"])
+        body.pack(fill="both", expand=True, padx=8, pady=8)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        scrollbar = tk.Scrollbar(
+            body,
+            orient="vertical",
+            width=0,
+            bg=self.theme["bg"],
+            troughcolor=self.theme["bg"],
+            activebackground=self.theme["bg"],
+            highlightbackground=self.theme["bg"],
+            relief="flat",
+            borderwidth=0,
+        )
+        text = tk.Text(
+            body,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            yscrollcommand=scrollbar.set,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        scrollbar.config(command=text.yview)
+        text.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        if not self.profile_data:
+            text.insert("end", "No profile loaded.\n")
+        else:
+            stats = self.profile_data.get("stats", {})
+            achievements = self.profile_data.get("achievements", [])
+            best_cards = self.profile_data.get("best_cards", {})
+            lines = [
+                f"Name: {self.profile_data.get('name', 'Unknown')}",
+                f"Wins: {self.profile_data.get('wins', 0)}",
+                f"Losses: {self.profile_data.get('losses', 0)}",
+                f"Banked kibbles: {self.profile_data.get('banked_kibbles', 0)}",
+                "",
+                "Stats",
+                f"- Steals: {stats.get('steals', 0)}",
+                f"- Max hand: {stats.get('max_hand', 0)}",
+                f"- Max game score: {stats.get('max_game_score', 0)}",
+                f"- Max kibble: {stats.get('max_kibble', 0)}",
+                f"- Max bag size: {stats.get('max_bag', 0)}",
+                f"- Min bag size: {stats.get('min_bag', 0)}",
+                f"- Max game depth reached: {self.format_game_depth(stats.get('game_depth', 0))}",
+                f"- Total games: {stats.get('total_games', 0)}",
+                "",
+                "Best Cards",
+            ]
+            if best_cards:
+                for name, count in sorted(best_cards.items(), key=lambda x: (-x[1], x[0])):
+                    lines.append(f"- {name}: {count}")
+            else:
+                lines.append("- None")
+            lines.append("")
+            lines.append("Achievements")
+            achieved = set(achievements)
+            for name in self.achievement_list:
+                status = "Unlocked" if name in achieved else "Locked"
+                desc = self.achievement_desc.get(name, "")
+                lines.append(f"- {name}: {status}")
+                if desc:
+                    lines.append(f"  {desc}")
+            text.insert("end", "\n".join(lines) + "\n")
+        text.configure(state="disabled")
+
+    def open_profiles_manager(self) -> None:
+        if hasattr(self, "setup_frame") and self.setup_frame.winfo_exists():
+            self.setup_frame.destroy()
+        if hasattr(self, "naming_frame") and self.naming_frame.winfo_exists():
+            self.naming_frame.destroy()
+        if hasattr(self, "profiles_frame") and self.profiles_frame.winfo_exists():
+            self.profiles_frame.destroy()
+
+        self.profile_action_images = self.load_profile_action_images()
+        self.profiles_frame = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        self.profiles_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        container = tk.Frame(self.profiles_frame, bg=self.theme["panel_dark"])
+        container.pack(fill="both", expand=True)
+        container.grid_columnconfigure(0, weight=2)
+        container.grid_columnconfigure(1, weight=3)
+        container.grid_rowconfigure(1, weight=1)
+
+        header = tk.Frame(container, bg=self.theme["panel_dark"])
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        title_img = self.ui_images.get("manage_profiles")
+        if title_img:
+            title_label = tk.Label(header, image=title_img, bg=self.theme["panel_dark"])
+            title_label.image = title_img
+            title_label.pack(side="left")
+        else:
+            tk.Label(
+                header,
+                text="Manage Profiles",
+                font=self.theme["header_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            ).pack(side="left")
+        back_img = self.profile_action_images.get("back")
+        back_wrap = tk.Frame(
+            header,
+            bg=self.theme["panel_dark"],
+            highlightthickness=2,
+            highlightbackground=self.theme["panel_dark"],
+        )
+        back_wrap.pack(side="right")
+        if back_img:
+            back_btn = tk.Button(
+                back_wrap,
+                image=back_img,
+                command=self.back_to_welcome,
+                bg=self.theme["panel_dark"],
+                activebackground=self.theme["panel_dark"],
+                relief="flat",
+                borderwidth=0,
+            )
+            back_btn.image = back_img
+        else:
+            back_btn = tk.Button(
+                back_wrap,
+                text="Back",
+                command=self.back_to_welcome,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        back_btn.pack()
+
+        def set_back_highlight(_event=None, active: bool = False) -> None:
+            back_wrap.config(
+                highlightbackground=self.theme["accent"] if active else self.theme["panel_dark"]
+            )
+
+        for widget in (back_wrap, back_btn):
+            widget.bind("<ButtonPress-1>", lambda _e: set_back_highlight(active=True))
+            widget.bind("<ButtonRelease-1>", lambda _e: set_back_highlight(active=False))
+            widget.bind("<Leave>", lambda _e: set_back_highlight(active=False))
+
+        profiles_dir = os.path.join(os.path.abspath("."), "profiles")
+        os.makedirs(profiles_dir, exist_ok=True)
+
+        list_frame = tk.Frame(container, bg=self.theme["panel_dark"])
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        list_frame.grid_rowconfigure(1, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            list_frame,
+            text="Profiles",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        list_canvas = tk.Canvas(
+            list_frame,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+        )
+        list_canvas.grid(row=1, column=0, sticky="nsew")
+        list_inner = tk.Frame(list_canvas, bg=self.theme["panel_dark"])
+        list_canvas_window = list_canvas.create_window((0, 0), window=list_inner, anchor="nw")
+        selected_profile_name = {"value": None}
+        profile_rows = {}
+
+        def on_list_configure(_event=None) -> None:
+            list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+
+        def on_canvas_configure(event) -> None:
+            list_canvas.itemconfigure(list_canvas_window, width=event.width)
+
+        list_inner.bind("<Configure>", on_list_configure)
+        list_canvas.bind("<Configure>", on_canvas_configure)
+
+        actions = tk.Frame(list_frame, bg=self.theme["panel_dark"])
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        create_frame = tk.Frame(list_frame, bg=self.theme["panel_dark"])
+        create_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        tk.Label(
+            create_frame,
+            text="New profile:",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(side="left")
+        create_var = tk.StringVar(value="")
+        create_entry = tk.Entry(
+            create_frame,
+            textvariable=create_var,
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+            relief="groove",
+            width=18,
+        )
+        create_entry.pack(side="left", padx=6)
+        create_img = self.profile_action_images.get("create")
+        create_wrap = tk.Frame(
+            create_frame,
+            bg=self.theme["panel_dark"],
+            highlightthickness=2,
+            highlightbackground=self.theme["panel_dark"],
+        )
+        create_wrap.pack(side="left")
+        if create_img:
+            create_btn = tk.Button(
+                create_wrap,
+                image=create_img,
+                command=lambda: on_create(create_var, create_entry),
+                bg=self.theme["panel_dark"],
+                activebackground=self.theme["panel_dark"],
+                relief="flat",
+                borderwidth=0,
+            )
+            create_btn.image = create_img
+        else:
+            create_btn = tk.Button(
+                create_wrap,
+                text="Create",
+                command=lambda: on_create(create_var, create_entry),
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=10,
+                pady=4,
+            )
+        create_btn.pack()
+
+        def set_create_highlight(_event=None, active: bool = False) -> None:
+            create_wrap.config(
+                highlightbackground=self.theme["accent"] if active else self.theme["panel_dark"]
+            )
+
+        for widget in (create_wrap, create_btn):
+            widget.bind("<ButtonPress-1>", lambda _e: set_create_highlight(active=True))
+            widget.bind("<ButtonRelease-1>", lambda _e: set_create_highlight(active=False))
+            widget.bind("<Leave>", lambda _e: set_create_highlight(active=False))
+
+        detail_frame = tk.Frame(container, bg=self.theme["panel_dark"])
+        detail_frame.grid(row=1, column=1, sticky="nsew")
+        detail_frame.grid_rowconfigure(1, weight=1)
+        detail_frame.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            detail_frame,
+            text="Profile Details",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        detail_body = tk.Frame(detail_frame, bg=self.theme["panel_dark"])
+        detail_body.grid(row=1, column=0, sticky="nsew")
+        detail_body.grid_rowconfigure(0, weight=1)
+        detail_body.grid_columnconfigure(0, weight=1)
+
+        detail_scroll = tk.Scrollbar(detail_body, orient="vertical", width=16)
+        detail_canvas = tk.Canvas(
+            detail_body,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+            yscrollcommand=detail_scroll.set,
+        )
+        detail_scroll.config(command=detail_canvas.yview)
+        detail_canvas.grid(row=0, column=0, sticky="nsew")
+        detail_scroll.grid(row=0, column=1, sticky="ns")
+
+        detail_content = tk.Frame(detail_canvas, bg=self.theme["panel_dark"])
+        detail_canvas_window = detail_canvas.create_window((0, 0), window=detail_content, anchor="nw")
+
+        def refresh_list(select_name: str | None = None) -> None:
+            for child in list_inner.winfo_children():
+                child.destroy()
+            profile_rows.clear()
+            files = sorted(
+                f for f in os.listdir(profiles_dir) if f.lower().endswith(".json")
+            )
+            names = [os.path.splitext(f)[0] for f in files]
+            for name in names:
+                row = tk.Frame(
+                    list_inner,
+                    bg=self.theme["panel_dark"],
+                    highlightthickness=2,
+                    highlightbackground=self.theme["panel_dark"],
+                )
+                row.pack(anchor="w", pady=2)
+                label = tk.Label(
+                    row,
+                    text=name,
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel_dark"],
+                    fg=self.theme["text"],
+                )
+                label.pack(side="left", padx=6, pady=2)
+                profile_rows[name] = (row, label)
+
+                def handle_select(_event=None, n=name) -> None:
+                    select_profile(n)
+
+                row.bind("<Button-1>", handle_select)
+                label.bind("<Button-1>", handle_select)
+            if select_name and select_name in names:
+                select_profile(select_name)
+
+        def read_profile_file(filename: str) -> dict | None:
+            path = os.path.join(profiles_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                return None
+            return self.ensure_profile_defaults(data)
+
+        def render_profile_details(data: dict | None) -> None:
+            for child in detail_content.winfo_children():
+                child.destroy()
+            if not data:
+                lines = ["Select a profile to view details."]
+            else:
+                stats = data.get("stats", {})
+                achievements = data.get("achievements", [])
+                best_cards = data.get("best_cards", {})
+                lines = [
+                    f"Name: {data.get('name', 'Unknown')}",
+                    f"Wins: {data.get('wins', 0)}",
+                    f"Losses: {data.get('losses', 0)}",
+                    f"Banked kibbles: {data.get('banked_kibbles', 0)}",
+                    "",
+                    "Stats",
+                    f"- Steals: {stats.get('steals', 0)}",
+                    f"- Max hand: {stats.get('max_hand', 0)}",
+                    f"- Max game score: {stats.get('max_game_score', 0)}",
+                    f"- Max kibble: {stats.get('max_kibble', 0)}",
+                    f"- Max bag size: {stats.get('max_bag', 0)}",
+                    f"- Min bag size: {stats.get('min_bag', 20)}",
+                    f"- Max game depth reached: {self.format_game_depth(stats.get('game_depth', 0))}",
+                    f"- Total games: {stats.get('total_games', 0)}",
+                    "",
+                    "Best Cards",
+                ]
+                if best_cards:
+                    for name, count in sorted(best_cards.items(), key=lambda x: (-x[1], x[0])):
+                        lines.append(f"- {name}: {count}")
+                else:
+                    lines.append("- None")
+                lines.append("")
+                lines.append("Achievements")
+                achieved = set(achievements)
+            for line in lines:
+                style = self.theme["body_font"]
+                fg = self.theme["text"] if line and not line.startswith("  ") else self.theme["muted"]
+                if line in ("Stats", "Best Cards", "Achievements"):
+                    style = self.theme["subheader_font"]
+                tk.Label(
+                    detail_content,
+                    text=line,
+                    font=style,
+                    bg=self.theme["panel_dark"],
+                    fg=fg,
+                    anchor="w",
+                    justify="left",
+                ).pack(anchor="w", pady=(0, 2))
+            if data:
+                detail_canvas.update_idletasks()
+                canvas_w = detail_canvas.winfo_width()
+                icon_max = max(36, min(64, (canvas_w - 48) // 4 if canvas_w else 48))
+                columns = max(3, min(4, (canvas_w - 20) // (icon_max + 10))) if canvas_w else 4
+                grid = tk.Frame(detail_content, bg=self.theme["panel_dark"])
+                grid.pack(anchor="w", pady=(4, 6))
+                for idx, name in enumerate(self.achievement_list):
+                    row = idx // columns
+                    col = idx % columns
+                    cell = tk.Frame(grid, bg=self.theme["panel_dark"])
+                    cell.grid(row=row, column=col, padx=4, pady=4)
+                    unlocked = name in achieved
+                    img = self.achievement_images.get(name)
+                    if img:
+                        display_img = img if unlocked else self.achievement_images_gray.get(name, img)
+                        display_img = self.scale_image_to_max(display_img, icon_max)
+                        icon = tk.Label(cell, image=display_img, bg=self.theme["panel_dark"])
+                        icon.image = display_img
+                        icon.pack()
+                    tk.Label(
+                        cell,
+                        text=name,
+                        font=self.theme["small_font"],
+                        bg=self.theme["panel_dark"],
+                        fg=self.theme["text"] if unlocked else self.theme["muted"],
+                        wraplength=110,
+                        justify="center",
+                    ).pack(pady=(2, 0))
+                    tooltip = self.achievement_desc.get(name, "")
+                    if tooltip:
+                        self.attach_tooltip(cell, tooltip)
+            detail_content.update_idletasks()
+            detail_canvas.configure(scrollregion=detail_canvas.bbox("all"))
+
+        def on_detail_configure(_event=None) -> None:
+            detail_canvas.configure(scrollregion=detail_canvas.bbox("all"))
+
+        detail_content.bind("<Configure>", on_detail_configure)
+
+        def select_profile(name: str) -> None:
+            selected_profile_name["value"] = name
+            for row, _label in profile_rows.values():
+                row.config(highlightbackground=self.theme["panel_dark"])
+            if name in profile_rows:
+                profile_rows[name][0].config(highlightbackground=self.theme["score_highlight"])
+            filename = name + ".json"
+            render_profile_details(read_profile_file(filename))
+
+        def on_load() -> None:
+            selection = selected_profile_name["value"]
+            if not selection:
+                return
+            filename = selection + ".json"
+            path = os.path.join(profiles_dir, filename)
+            self.load_profile(path)
+            if (
+                self.profile_label
+                and self.profile_label.winfo_exists()
+                and self.profile_data
+            ):
+                self.profile_label.config(text=f"Profile: {self.profile_data['name']}")
+            if hasattr(self, "name_vars") and self.name_vars and self.profile_data:
+                self.name_vars[0].set(self.profile_data["name"])
+            render_profile_details(self.profile_data)
+
+        def on_save() -> None:
+            if not self.profile_data:
+                messagebox.showinfo(
+                    "No Profile",
+                    "Load or create a profile before saving.",
+                    parent=self.root,
+                )
+                return
+            self.save_profile()
+            if (
+                self.profile_label
+                and self.profile_label.winfo_exists()
+                and self.profile_data
+            ):
+                self.profile_label.config(text=f"Profile: {self.profile_data['name']}")
+            refresh_list(os.path.splitext(os.path.basename(self.profile_path))[0] if self.profile_path else None)
+            self.show_toast("Current data saved!")
+
+        def on_delete() -> None:
+            selection = selected_profile_name["value"]
+            if not selection:
+                return
+            filename = selection + ".json"
+            if hasattr(self, "profile_delete_modal") and self.profile_delete_modal.winfo_exists():
+                self.profile_delete_modal.destroy()
+
+            modal = tk.Frame(self.profiles_frame, bg=self.theme["panel_dark"])
+            modal.place(relx=0.5, rely=0.5, anchor="center")
+            self.profile_delete_modal = modal
+
+            tk.Label(
+                modal,
+                text="Delete Profile",
+                font=self.theme["subheader_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+            ).pack(padx=14, pady=(10, 4))
+            tk.Label(
+                modal,
+                text=f"Delete '{selection}'? This cannot be undone.",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["muted"],
+            ).pack(padx=14, pady=(0, 10))
+
+            actions_row = tk.Frame(modal, bg=self.theme["panel_dark"])
+            actions_row.pack(pady=(0, 10))
+
+            yes_img = self.profile_action_images.get("yes")
+            no_img = self.profile_action_images.get("no")
+
+            def close_modal() -> None:
+                if modal.winfo_exists():
+                    modal.destroy()
+
+            def confirm_delete() -> None:
+                path = os.path.join(profiles_dir, filename)
+                try:
+                    os.remove(path)
+                except OSError:
+                    close_modal()
+                    return
+                if self.profile_path and os.path.abspath(self.profile_path) == os.path.abspath(path):
+                    self.profile_data = None
+                    self.profile_path = None
+                    self.profile_player_name = None
+                    self.game_depth = 0
+                    if self.profile_label and self.profile_label.winfo_exists():
+                        self.profile_label.config(text="Profile: None")
+                selected_profile_name["value"] = None
+                refresh_list()
+                render_profile_details(None)
+                self.show_profile_deleted_toast()
+                close_modal()
+
+            def make_modal_button(image, fallback_text, command) -> None:
+                wrap = tk.Frame(
+                    actions_row,
+                    bg=self.theme["panel_dark"],
+                    highlightthickness=2,
+                    highlightbackground=self.theme["panel_dark"],
+                )
+                wrap.pack(side="left", padx=6)
+                if image:
+                    btn = tk.Button(
+                        wrap,
+                        image=image,
+                        command=command,
+                        bg=self.theme["panel_dark"],
+                        activebackground=self.theme["panel_dark"],
+                        relief="flat",
+                        borderwidth=0,
+                    )
+                    btn.image = image
+                else:
+                    btn = tk.Button(
+                        wrap,
+                        text=fallback_text,
+                        command=command,
+                        font=self.theme["body_font"],
+                        bg=self.theme["btn"],
+                        fg=self.theme["btn_text"],
+                        activebackground=self.theme["btn_active"],
+                        relief="flat",
+                        padx=10,
+                        pady=4,
+                    )
+                btn.pack()
+
+                def set_highlight(_event=None, active: bool = False) -> None:
+                    wrap.config(
+                        highlightbackground=self.theme["accent"] if active else self.theme["panel_dark"]
+                    )
+
+                for widget in (wrap, btn):
+                    widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                    widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                    widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+            make_modal_button(yes_img, "Yes", confirm_delete)
+            make_modal_button(no_img, "No", close_modal)
+
+        def on_create(var: tk.StringVar, entry: tk.Entry) -> None:
+            name = var.get().strip()
+            if not name:
+                return
+            self.create_profile(name)
+            if (
+                self.profile_label
+                and self.profile_label.winfo_exists()
+                and self.profile_data
+            ):
+                self.profile_label.config(text=f"Profile: {self.profile_data['name']}")
+            refresh_list(os.path.basename(self.profile_path) if self.profile_path else None)
+            render_profile_details(self.profile_data)
+            var.set("")
+            entry.focus_set()
+
+        def make_profile_action_button(key: str, fallback_text: str, command) -> None:
+            img = self.profile_action_images.get(key)
+            wrap = tk.Frame(
+                actions,
+                bg=self.theme["panel_dark"],
+                highlightthickness=2,
+                highlightbackground=self.theme["panel_dark"],
+            )
+            wrap.pack(side="left", padx=6)
+            if img:
+                btn = tk.Button(
+                    wrap,
+                    image=img,
+                    command=command,
+                    bg=self.theme["panel_dark"],
+                    activebackground=self.theme["panel_dark"],
+                    relief="flat",
+                    borderwidth=0,
+                )
+                btn.image = img
+            else:
+                btn = tk.Button(
+                    wrap,
+                    text=fallback_text,
+                    command=command,
+                    font=self.theme["body_font"],
+                    bg=self.theme["btn"],
+                    fg=self.theme["btn_text"],
+                    activebackground=self.theme["btn_active"],
+                    relief="flat",
+                    padx=10,
+                    pady=4,
+                )
+            btn.pack()
+
+            def set_highlight(_event=None, active: bool = False) -> None:
+                wrap.config(
+                    highlightbackground=self.theme["accent"] if active else self.theme["panel_dark"]
+                )
+
+            for widget in (wrap, btn):
+                widget.bind("<ButtonPress-1>", lambda _e: set_highlight(active=True))
+                widget.bind("<ButtonRelease-1>", lambda _e: set_highlight(active=False))
+                widget.bind("<Leave>", lambda _e: set_highlight(active=False))
+
+        make_profile_action_button("load", "Load", on_load)
+        make_profile_action_button("save", "Save", on_save)
+        make_profile_action_button("delete", "Delete", on_delete)
+
+        refresh_list()
+        render_profile_details(self.profile_data if self.profile_data else None)
+
+    def open_profile_modal(self) -> None:
+        modal = tk.Toplevel(self.root)
+        modal.title("Create Profile")
+        modal.configure(bg=self.theme["panel_dark"])
+        modal.transient(self.root)
+        modal.grab_set()
+
+        tk.Label(
+            modal,
+            text="Profile Name",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        name_var = tk.StringVar(value="")
+        entry = tk.Entry(
+            modal,
+            textvariable=name_var,
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+            relief="groove",
+        )
+        entry.pack(fill="x", padx=12, pady=(0, 8))
+        entry.focus_set()
+
+        hint = tk.Label(
+            modal,
+            text="Tracks stats for Player 1 (human).",
+            font=self.theme["small_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        hint.pack(anchor="w", padx=12, pady=(0, 8))
+
+        actions = tk.Frame(modal, bg=self.theme["panel_dark"])
+        actions.pack(fill="x", padx=12, pady=(0, 12))
+
+        def on_create() -> None:
+            name = name_var.get().strip()
+            if not name:
+                return
+            self.create_profile(name)
+            if self.profile_label and self.profile_data:
+                self.profile_label.config(text=f"Profile: {self.profile_data['name']}")
+            modal.destroy()
+
+        tk.Button(
+            actions,
+            text="Create",
+            command=on_create,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            actions,
+            text="Cancel",
+            command=modal.destroy,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(side="left")
+
+    def open_load_profile_modal(self) -> None:
+        modal = tk.Toplevel(self.root)
+        modal.title("Load Profile")
+        modal.configure(bg=self.theme["panel_dark"])
+        modal.transient(self.root)
+        modal.grab_set()
+
+        profiles_dir = os.path.join(os.path.abspath("."), "profiles")
+        os.makedirs(profiles_dir, exist_ok=True)
+        files = sorted(
+            f for f in os.listdir(profiles_dir) if f.lower().endswith(".json")
+        )
+
+        tk.Label(
+            modal,
+            text="Select a profile",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+
+        list_var = tk.StringVar(value=files)
+        listbox = tk.Listbox(
+            modal,
+            listvariable=list_var,
+            height=min(8, max(3, len(files))),
+            font=self.theme["body_font"],
+            bg=self.theme["panel"],
+            fg=self.theme["text"],
+        )
+        listbox.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        actions = tk.Frame(modal, bg=self.theme["panel_dark"])
+        actions.pack(fill="x", padx=12, pady=(0, 12))
+
+        def on_load() -> None:
+            selection = listbox.curselection()
+            if not selection:
+                return
+            filename = files[selection[0]]
+            path = os.path.join(profiles_dir, filename)
+            self.load_profile(path)
+            if self.profile_label and self.profile_data:
+                self.profile_label.config(text=f"Profile: {self.profile_data['name']}")
+            if self.name_vars:
+                self.name_vars[0].set(self.profile_data["name"])
+            modal.destroy()
+
+        tk.Button(
+            actions,
+            text="Load",
+            command=on_load,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            actions,
+            text="Cancel",
+            command=modal.destroy,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        ).pack(side="left")
+
+    def create_profile(self, name: str) -> None:
+        profiles_dir = os.path.join(os.path.abspath("."), "profiles")
+        os.makedirs(profiles_dir, exist_ok=True)
+        safe_name = "".join(ch for ch in name if ch.isalnum() or ch in (" ", "-", "_")).strip()
+        if not safe_name:
+            return
+        path = os.path.join(profiles_dir, f"{safe_name}.json")
+        if os.path.exists(path):
+            if not messagebox.askyesno(
+                "Overwrite Profile",
+                f"A profile named '{safe_name}' already exists. Overwrite?",
+                parent=self.root,
+            ):
+                return
+        self.ensure_option_vars()
+        data = {
+            "name": safe_name,
+            "wins": 0,
+            "losses": 0,
+            "best_cards": {},
+            "achievements": [],
+            "banked_kibbles": 0,
+            "unlocked_cards": {
+                "cats": [],
+                "dogs": [],
+            },
+            "boosters": {
+                "rivalry_booster": False,
+                "service_booster": False,
+                "trickster_booster": False,
+            },
+            "stats": {
+                "steals": 0,
+                "max_hand": 0,
+                "max_game_score": 0,
+                "max_kibble": 0,
+                "max_bag": 0,
+                "min_bag": 999,
+                "game_depth": 0,
+                "total_games": 0,
+            },
+            "options": {
+                "starting_kibbles": int(self.kibble_var.get()),
+                "max_cat_cards": int(self.max_cat_var.get()),
+                "max_dog_cards": int(self.max_dog_var.get()),
+                "mute": bool(self.mute_var.get()),
+                "volume": int(self.volume_var.get()),
+                "speed": bool(self.speed_var.get()),
+                "debug": bool(self.debug_var.get()),
+                "fullscreen": bool(self.fullscreen_var.get()),
+            },
+        }
+        self.profile_data = data
+        self.profile_path = path
+        self.save_profile()
+        if hasattr(self, "name_vars") and self.name_vars:
+            self.name_vars[0].set(self.profile_data["name"])
+        self.refresh_achievement_panel()
+
+    def load_profile(self, path: str) -> None:
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not data.get("name"):
+            return
+        self.profile_data = self.ensure_profile_defaults(data)
+        self.profile_path = path
+        self.apply_profile_options()
+        if hasattr(self, "name_vars") and self.name_vars:
+            self.name_vars[0].set(self.profile_data["name"])
+        self.refresh_achievement_panel()
+        self.show_profile_loaded_toast()
+
+    def save_profile(self) -> None:
+        if not self.profile_data or not self.profile_path:
+            return
+        self.sync_profile_options()
+        with open(self.profile_path, "w", encoding="utf-8") as handle:
+            json.dump(self.profile_data, handle, indent=2)
+        self.refresh_achievement_panel()
+
+    def show_profile_loaded_toast(self) -> None:
+        if getattr(self, "profile_toast", None) and self.profile_toast.winfo_exists():
+            self.profile_toast.destroy()
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        tk.Label(
+            toast,
+            text="Profile Loaded",
+            font=self.theme["small_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", padx=12, pady=6)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.profile_toast = toast
+        self.root.after(1800, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_profile_deleted_toast(self) -> None:
+        if getattr(self, "profile_toast", None) and self.profile_toast.winfo_exists():
+            self.profile_toast.destroy()
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        tk.Label(
+            toast,
+            text="Profile Deleted",
+            font=self.theme["small_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", padx=12, pady=6)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.profile_toast = toast
+        self.root.after(1800, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_bank_toast(self, text: str, duration_ms: int = 2200) -> None:
+        if getattr(self, "bank_toast", None) and self.bank_toast.winfo_exists():
+            self.bank_toast.destroy()
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        tk.Label(
+            toast,
+            text=text,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", padx=14, pady=10)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "top_right",
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            x=-8,
+            y=8,
+        )
+        self.bank_toast = toast
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_toast(
+        self,
+        text: str,
+        duration_ms: int = 1800,
+        highlight: bool = False,
+        dismiss_on_click: bool = False,
+    ) -> None:
+        if getattr(self, "toast", None) and self.toast.winfo_exists():
+            self.toast.destroy()
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        fg = self.theme["accent"] if highlight else self.theme["text"]
+        font = self.theme["subheader_font"]
+        if highlight and isinstance(font, tuple):
+            font = (*font, "underline")
+        label = tk.Label(
+            toast,
+            text=text,
+            font=font,
+            bg=self.theme["panel_dark"],
+            fg=fg,
+        )
+        label.pack(anchor="center", padx=16, pady=10)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.toast = toast
+        if dismiss_on_click:
+            toast.bind("<Button-1>", lambda _e: toast.destroy() if toast.winfo_exists() else None)
+            label.bind("<Button-1>", lambda _e: toast.destroy() if toast.winfo_exists() else None)
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_card_unlock_toast(self, card: Card, text: str, duration_ms: int = 2400) -> None:
+        if getattr(self, "toast", None) and self.toast.winfo_exists():
+            self.toast.destroy()
+        if not self.mute_var.get():
+            self.play_sound(self.achievement_sound)
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        img = self.get_picker_card_image(card)
+        if img:
+            img_label = tk.Label(toast, image=img, bg=self.theme["panel_dark"])
+            img_label.image = img
+            img_label.pack(anchor="center", padx=12, pady=(10, 4))
+        tk.Label(
+            toast,
+            text=text,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["accent"],
+        ).pack(anchor="center", padx=16, pady=(0, 10))
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "top_right",
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            x=-8,
+            y=8,
+        )
+        self.toast = toast
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_kibble_unlock_toast(self, amount: int, text: str, duration_ms: int = 2400) -> None:
+        if getattr(self, "toast", None) and self.toast.winfo_exists():
+            self.toast.destroy()
+        if not self.mute_var.get():
+            self.play_sound(self.achievement_sound)
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        img = self.get_kibble_image(amount)
+        if img:
+            img_label = tk.Label(toast, image=img, bg=self.theme["panel_dark"])
+            img_label.image = img
+            img_label.pack(anchor="center", padx=12, pady=(10, 4))
+        tk.Label(
+            toast,
+            text=text,
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["accent"],
+        ).pack(anchor="center", padx=16, pady=(0, 10))
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "top_right",
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            x=-8,
+            y=8,
+        )
+        self.toast = toast
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_score_toast(
+        self,
+        text: str,
+        duration_ms: int = 2200,
+        highlight: bool = False,
+        dismiss_on_click: bool = False,
+    ) -> None:
+        if getattr(self, "score_toast", None) and self.score_toast.winfo_exists():
+            self.score_toast.destroy()
+        self.append_toast_log(text)
+        parent = self.center_frame if hasattr(self, "center_frame") and self.center_frame.winfo_exists() else self.root
+        toast = tk.Frame(parent, bg=self.theme["panel_dark"])
+        fg = self.theme["accent"] if highlight else self.theme["text"]
+        font = self.theme["subheader_font"]
+        if highlight and isinstance(font, tuple):
+            font = (*font, "underline")
+        label = tk.Label(
+            toast,
+            text=text,
+            font=font,
+            bg=self.theme["panel_dark"],
+            fg=fg,
+        )
+        label.pack(anchor="center", padx=16, pady=10)
+        if parent is self.root:
+            self.register_toast_widget(
+                toast,
+                parent,
+                "bottom_center",
+                relx=0.5,
+                rely=0.85,
+                anchor="s",
+            )
+        else:
+            self.register_toast_widget(
+                toast,
+                parent,
+                "bottom_center",
+                relx=0.5,
+                rely=1.0,
+                anchor="s",
+                y=-8,
+            )
+        self.score_toast = toast
+        if dismiss_on_click:
+            toast.bind("<Button-1>", lambda _e: toast.destroy() if toast.winfo_exists() else None)
+            label.bind("<Button-1>", lambda _e: toast.destroy() if toast.winfo_exists() else None)
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def show_end_game_toast(self, text: str, duration_ms: int = 2000, rainbow: bool = False) -> None:
+        if getattr(self, "end_game_toast", None) and self.end_game_toast.winfo_exists():
+            self.end_game_toast.destroy()
+        self.append_toast_log(text)
+        toast = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        base_font = self.theme.get("subheader_font")
+        if isinstance(base_font, tuple) and len(base_font) >= 2:
+            font_name = base_font[0]
+            font_size = base_font[1]
+            font_rest = base_font[2:]
+            toast_font = (font_name, int(font_size * 2), *font_rest)
+        else:
+            toast_font = base_font
+        label = tk.Label(
+            toast,
+            text=text,
+            font=toast_font,
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        label.pack(anchor="center", padx=20, pady=14)
+        self.register_toast_widget(
+            toast,
+            self.root,
+            "center_stack",
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+        )
+        self.end_game_toast = toast
+
+        if rainbow:
+            colors = ["#ff5f5f", "#ffb45f", "#fff35f", "#7dff6a", "#4fd1ff", "#8a6bff"]
+
+            def step(i: int) -> None:
+                if not toast.winfo_exists():
+                    return
+                label.config(fg=colors[i % len(colors)])
+                toast.after(120, lambda: step(i + 1))
+
+            step(0)
+
+        self.root.after(duration_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def update_profile_after_game(self, standings: list[Player]) -> None:
+        if not self.profile_data or not self.profile_player_name:
+            return
+        target = next((p for p in standings if p.name == self.profile_player_name), None)
+        if not target:
+            return
+        top_score = max((p.total_score for p in standings), default=0.0)
+        if target.total_score >= top_score:
+            self.profile_data["wins"] = self.profile_data.get("wins", 0) + 1
+        else:
+            self.profile_data["losses"] = self.profile_data.get("losses", 0) + 1
+        bonuses = self.bonus_points_by_player.get(target.name, {})
+        if bonuses:
+            best_card = max(bonuses.items(), key=lambda x: x[1])[0]
+            best_cards = self.profile_data.setdefault("best_cards", {})
+            best_cards[best_card] = best_cards.get(best_card, 0) + 1
+        if self.profile_data["wins"] >= 5:
+            self.unlock_achievement("Big Dawg")
+        if self.profile_data["wins"] >= 10:
+            self.unlock_achievement("Veteran Dawg")
+        stats = self.profile_data.setdefault("stats", {})
+        stats["max_game_score"] = max(stats.get("max_game_score", 0), int(target.total_score))
+        if stats["max_game_score"] >= 100:
+            self.unlock_achievement("Smarty Cat")
+        if stats["max_game_score"] >= 160:
+            self.unlock_achievement("Cat from on high")
+        self.save_profile()
+
+    def ensure_profile_defaults(self, data: dict) -> dict:
+        data.setdefault("wins", 0)
+        data.setdefault("losses", 0)
+        data.setdefault("best_cards", {})
+        data.setdefault("achievements", [])
+        data.setdefault("banked_kibbles", 0)
+        data.setdefault("unlocked_cards", {"cats": [], "dogs": []})
+        data.setdefault("shop_collection", {"cats": [], "dogs": []})
+        data.setdefault(
+            "boosters",
+            {
+                "rivalry_booster": False,
+                "service_booster": False,
+                "trickster_booster": False,
+            },
+        )
+        stats = data.setdefault("stats", {})
+        stats.setdefault("steals", 0)
+        stats.setdefault("max_hand", 0)
+        stats.setdefault("max_game_score", 0)
+        stats.setdefault("max_kibble", 0)
+        stats.setdefault("max_bag", 0)
+        stats.setdefault("min_bag", 999)
+        stats.setdefault("game_depth", 0)
+        stats.setdefault("total_games", 0)
+        options = data.setdefault("options", {})
+        options.setdefault("starting_kibbles", 4)
+        options.setdefault("max_cat_cards", 2)
+        options.setdefault("max_dog_cards", 5)
+        options.setdefault("mute", False)
+        options.setdefault("volume", 100)
+        options.setdefault("speed", False)
+        options.setdefault("debug", False)
+        options.setdefault("fullscreen", False)
+        return data
+
+    def apply_profile_options(self) -> None:
+        if not self.profile_data:
+            return
+        self.ensure_option_vars()
+        options = self.profile_data.get("options", {})
+        self.kibble_var.set(int(options.get("starting_kibbles", self.kibble_var.get())))
+        self.max_cat_var.set(int(options.get("max_cat_cards", self.max_cat_var.get())))
+        self.max_dog_var.set(int(options.get("max_dog_cards", self.max_dog_var.get())))
+        self.mute_var.set(bool(options.get("mute", self.mute_var.get())))
+        self.volume_var.set(int(options.get("volume", self.volume_var.get())))
+        self.speed_var.set(bool(options.get("speed", self.speed_var.get())))
+        if self.debug_enabled:
+            self.debug_var.set(bool(options.get("debug", self.debug_var.get())))
+        else:
+            self.debug_var.set(False)
+        self.fullscreen_var.set(bool(options.get("fullscreen", self.fullscreen_var.get())))
+        self.apply_display_mode()
+        self.on_toggle_mute()
+        self.on_volume_change()
+        self.on_toggle_speed()
+        if self.debug_enabled:
+            self.on_toggle_debug()
+        else:
+            if self.debug_window and self.debug_window.winfo_exists():
+                self.debug_window.destroy()
+                self.debug_window = None
+
+    def sync_profile_options(self) -> None:
+        if not self.profile_data:
+            return
+        self.ensure_option_vars()
+        self.profile_data["options"] = {
+            "starting_kibbles": int(self.kibble_var.get()),
+            "max_cat_cards": int(self.max_cat_var.get()),
+            "max_dog_cards": int(self.max_dog_var.get()),
+            "mute": bool(self.mute_var.get()),
+            "volume": int(self.volume_var.get()),
+            "speed": bool(self.speed_var.get()),
+            "debug": bool(self.debug_var.get()) if self.debug_enabled else False,
+            "fullscreen": bool(self.fullscreen_var.get()),
+        }
+
+    def is_profile_player(self, player: Player) -> bool:
+        return bool(self.profile_data and self.profile_player_name == player.name)
+
+    def increment_profile_stat(self, key: str, amount: int) -> None:
+        if not self.profile_data:
+            return
+        stats = self.profile_data.setdefault("stats", {})
+        stats[key] = stats.get(key, 0) + amount
+        if key == "steals" and stats[key] >= 5:
+            self.unlock_achievement("Royal Swiper")
+        self.save_profile()
+
+    def update_profile_roll_achievements(self, player: Player) -> None:
+        if not self.is_profile_player(player) or not self.game:
+            return
+        colors = [d.color for d in self.game.current_hand]
+        if not colors:
+            return
+        unique_colors = set(colors)
+        if len(unique_colors) == 1:
+            self.unlock_achievement("Rolling")
+            if "purple" in unique_colors:
+                self.unlock_achievement("Rolling loud")
+        if unique_colors == set(COLORS):
+            self.unlock_achievement("Mutli-flavored-schlogy")
+
+    def update_profile_after_turn(self, player: Player, result) -> None:
+        if not self.is_profile_player(player):
+            return
+        stats = self.profile_data.setdefault("stats", {})
+        stats["max_hand"] = max(stats.get("max_hand", 0), int(result.total))
+        if stats["max_hand"] >= 20:
+            self.unlock_achievement("Bag of Coin")
+        if stats["max_hand"] >= 30:
+            self.unlock_achievement("Bag of Riches")
+        if stats["max_hand"] >= 35:
+            self.unlock_achievement("Royal Synergy")
+        bag_total = player.bag.total()
+        stats["max_bag"] = max(stats.get("max_bag", 0), bag_total)
+        stats["min_bag"] = min(stats.get("min_bag", 999), bag_total)
+        if bag_total > 24:
+            self.unlock_achievement("Bag of holding")
+        if bag_total < 14:
+            self.unlock_achievement("Light Packer")
+        if bag_total < 10:
+            self.unlock_achievement("Ultra light packer")
+        stats["max_kibble"] = max(stats.get("max_kibble", 0), int(player.kibbles))
+        if stats["max_kibble"] >= 25:
+            self.unlock_achievement("Royal Kibbler")
+        counts = {}
+        for card in player.dog_cards + player.stolen_dog_cards:
+            counts[card.name] = counts.get(card.name, 0) + 1
+        if counts and max(counts.values()) >= 4:
+            self.unlock_achievement("Has cloning gone too far?")
+        self.save_profile()
+
+    def unlock_achievement(self, name: str) -> None:
+        if not self.profile_data or name not in self.achievement_list:
+            return
+        achievements = self.profile_data.setdefault("achievements", [])
+        if name not in achievements:
+            achievements.append(name)
+            if hasattr(self, "main_frame") and self.main_frame.winfo_exists():
+                self.show_achievement_popup(name)
+        non_grand = [a for a in self.achievement_list if a != "Grand Poohbah"]
+        if all(a in achievements for a in non_grand):
+            if "Grand Poohbah" not in achievements:
+                achievements.append("Grand Poohbah")
+                if hasattr(self, "main_frame") and self.main_frame.winfo_exists():
+                    self.show_achievement_popup("Grand Poohbah")
+        self.refresh_achievement_panel()
+
+    def refresh_achievement_panel(self) -> None:
+        if (
+            not hasattr(self, "achievement_icon_frame")
+            or not self.achievement_icon_frame
+            or not self.achievement_icon_frame.winfo_exists()
+        ):
+            return
+        for child in self.achievement_icon_frame.winfo_children():
+            if child.winfo_exists():
+                child.destroy()
+        achieved = set()
+        if self.profile_data:
+            achieved = set(self.profile_data.get("achievements", []))
+        columns = 4
+        for idx, name in enumerate(self.achievement_list):
+            row = idx // columns
+            col = idx % columns
+            cell = tk.Frame(self.achievement_icon_frame, bg=self.theme["panel_dark"])
+            cell.grid(row=row, column=col, padx=6, pady=6, sticky="n")
+            unlocked = name in achieved
+            img = self.achievement_images.get(name)
+            if img:
+                display_img = img if unlocked else self.achievement_images_gray.get(name, img)
+                icon = tk.Label(cell, image=display_img, bg=self.theme["panel_dark"])
+                icon.image = display_img
+                icon.pack()
+            else:
+                icon = tk.Label(
+                    cell,
+                    text=name,
+                    font=self.theme["body_font"],
+                    bg=self.theme["panel_dark"],
+                    fg=self.theme["text"],
+                    wraplength=120,
+                    justify="center",
+                )
+                icon.pack()
+            tk.Label(
+                cell,
+                text=name,
+                font=self.theme["small_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"] if unlocked else self.theme["muted"],
+                wraplength=120,
+                justify="center",
+            ).pack(pady=(2, 0))
+
+    def show_achievement_popup(self, name: str) -> None:
+        desc = self.achievement_desc.get(name, "")
+        if self.achievement_popup and self.achievement_popup.winfo_exists():
+            self.achievement_popup.destroy()
+        if not self.mute_var.get():
+            self.play_sound(self.achievement_sound)
+        popup = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        icon = self.achievement_images.get(name)
+        if icon:
+            icon_img = self.scale_image_to_max(icon, 32)
+            icon_label = tk.Label(popup, image=icon_img, bg=self.theme["panel_dark"])
+            icon_label.image = icon_img
+            icon_label.pack(anchor="center", padx=8, pady=(6, 2))
+        tk.Label(
+            popup,
+            text=f"Achievement Unlocked: {name}",
+            font=self.theme["small_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        ).pack(anchor="w", padx=8, pady=(0, 2))
+        if desc:
+            tk.Label(
+                popup,
+                text=desc,
+                font=self.theme["small_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["muted"],
+            ).pack(anchor="w", padx=8, pady=(0, 6))
+        self.register_toast_widget(
+            popup,
+            self.root,
+            "top_right",
+            relx=1.0,
+            rely=0.0,
+            anchor="ne",
+            x=-8,
+            y=8,
+        )
+        self.achievement_popup = popup
+        self.root.after(2500, lambda: popup.destroy() if popup.winfo_exists() else None)
+
+    def ensure_round_entry(self, round_num: int):
+        for entry in reversed(self.round_history):
+            if entry["round"] == round_num:
+                return entry
+        entry = {"round": round_num, "scores": []}
+        self.round_history.append(entry)
+        return entry
+
+    def update_scorecard(self) -> None:
+        lines = []
+        for entry in reversed(self.round_history):
+            lines.append(f"Round {entry['round']}")
+            if not entry["scores"]:
+                lines.append("  (no scores yet)")
+            else:
+                for score in entry["scores"]:
+                    bonus = " + color bonus" if score["bonus"] else ""
+                    lines.append(
+                        f"  {score['player']}: {score['total']} ({score['name']}{bonus})"
+                    )
+                    detail_parts = []
+                    if "base" in score:
+                        detail_parts.append(f"{score.get('name', 'Base')} {score['base']}")
+                    bonuses = score.get("bonuses", [])
+                    hand_mods = score.get("hand_mods", 0)
+                    if bonuses:
+                        detail_parts.append(f"Mods {self.format_bonus_list(bonuses)}")
+                    elif hand_mods:
+                        detail_parts.append(f"Mods +{hand_mods}")
+                    color_bonus = score.get("color_bonus", 0)
+                    if color_bonus:
+                        detail_parts.append(f"Color +{color_bonus}")
+                    extra = score.get("extra_points", 0)
+                    if extra:
+                        detail_parts.append(f"Extra +{extra}")
+                    if detail_parts:
+                        lines.append("    " + " | ".join(detail_parts))
+                    if bonuses:
+                        lines.append(
+                            f"    Card bonuses: {self.format_bonus_list(bonuses)}"
+                        )
+            lines.append("")
+        self.scorecard_text.delete("1.0", "end")
+        self.scorecard_text.insert("end", "\n".join(lines).rstrip() + "\n")
+        if self.scorecard_panel_visible:
+            self.refresh_scorecard_panel()
+
+    def build_scorecard_panel(self) -> None:
+        if not hasattr(self, "log_panel_container"):
+            return
+        self.scorecard_panel_frame = tk.Frame(self.log_panel_container, bg=self.theme["bg"])
+        tk.Label(
+            self.scorecard_panel_frame,
+            text="Scorecard",
+            font=self.theme["subheader_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="center", pady=(2, 6))
+        self.scorecard_panel_text = tk.Text(
+            self.scorecard_panel_frame,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            highlightbackground=self.theme["bg"],
+            highlightcolor=self.theme["bg"],
+        )
+        self.scorecard_panel_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self.make_text_readonly(self.scorecard_panel_text)
+        self.scorecard_panel_frame.pack(fill="both", expand=True)
+
+    def refresh_scorecard_panel(self) -> None:
+        if not self.scorecard_panel_visible:
+            return
+        if not self.scorecard_panel_text or not self.scorecard_panel_text.winfo_exists():
+            self.build_scorecard_panel()
+            if not self.scorecard_panel_text:
+                return
+        self.scorecard_panel_text.delete("1.0", "end")
+        score_contents = self.scorecard_text.get("1.0", "end").strip()
+        if score_contents:
+            self.scorecard_panel_text.insert("end", score_contents + "\n")
+
+    def toggle_scorecard(self) -> None:
+        if self.compact_player_panels and hasattr(self, "log_panel_container"):
+            if self.scorecard_panel_visible:
+                self.scorecard_panel_visible = False
+                if self.scorecard_panel_frame and self.scorecard_panel_frame.winfo_exists():
+                    self.scorecard_panel_frame.destroy()
+                    self.scorecard_panel_frame = None
+                    self.scorecard_panel_text = None
+                if self.log_panel_visible:
+                    self.refresh_log_panel()
+                else:
+                    self.log_panel_container.grid_remove()
+                    self.update_bottom_panel_layout()
+                self.scorecard_button.config(text="Show Scorecard")
+                return
+            for widget in self.log_panel_container.winfo_children():
+                widget.destroy()
+            self.log_panel_visible = False
+            self.scorecard_panel_visible = True
+            self.build_scorecard_panel()
+            self.refresh_scorecard_panel()
+            self.log_panel_container.grid()
+            self.scorecard_button.config(text="Hide Scorecard")
+            self.update_bottom_panel_layout()
+            return
+        if self.scorecard_visible:
+            self.scorecard_frame.pack_forget()
+            self.scorecard_button.config(text="Show Scorecard")
+            self.scorecard_visible = False
+        else:
+            self.scorecard_frame.pack(fill="both", expand=True, pady=5)
+            self.scorecard_button.config(text="Hide Scorecard")
+            self.scorecard_visible = True
+
+    def toggle_rulebook(self) -> None:
+        if self.rulebook_visible:
+            self.rulebook_frame.pack_forget()
+            self.rulebook_button.config(text="Rulebook")
+            self.rulebook_visible = False
+            return
+        self.rulebook_text.configure(state="normal")
+        self.rulebook_text.delete("1.0", "end")
+        self.rulebook_text.insert("end", self.get_rulebook_text())
+        self.rulebook_text.configure(state="disabled")
+        self.rulebook_frame.pack(fill="both", expand=True, pady=5)
+        self.rulebook_button.config(text="Hide Rulebook")
+        self.rulebook_visible = True
+
+    def update_bottom_panel_layout(self) -> None:
+        if not self.compact_player_panels or not hasattr(self, "bottom_panel_container"):
+            return
+        show_side = self.log_panel_visible or self.scorecard_panel_visible
+        if show_side:
+            self.bottom_panel_container.grid_columnconfigure(0, weight=9)
+            self.bottom_panel_container.grid_columnconfigure(1, weight=1)
+            self.player_panel_container.grid_configure(padx=(0, 6))
+        else:
+            self.bottom_panel_container.grid_columnconfigure(0, weight=1)
+            self.bottom_panel_container.grid_columnconfigure(1, weight=0)
+            self.player_panel_container.grid_configure(padx=0)
+
+    def toggle_hand_info(self, player_idx: int | None = None) -> None:
+        self.show_hand_info = not self.show_hand_info
+        self.update_table_view()
+
+    def run_ai_cat_cards(self, player: Player) -> bool:
+        game = self.game
+        if not game or not player.cat_cards:
+            return False
+        used_any = True
+        used_total = False
+        while used_any:
+            used_any = False
+            priority = []
+            if len(player.dog_cards) >= max(1, game.max_dog_cards - 1):
+                priority = [c for c in player.cat_cards if c.name == "Lion Cut Cat"]
+            ordered = priority + [c for c in player.cat_cards if c not in priority]
+            for card in list(ordered):
+                if self.ai_should_use_cat_card(player, card):
+                    if card.name == "Nimble Cat":
+                        if getattr(player, "rerolls_blocked", False):
+                            continue
+                        player.cat_cards.remove(card)
+                        self.ai_apply_nimble_reroll(player)
+                        self.show_toast(f"{player.name} used Nimble Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Devil Cat":
+                        if getattr(player, "rerolls_blocked", False):
+                            continue
+                        player.cat_cards.remove(card)
+                        if self.game:
+                            self.game.cat_deck.add(card)
+                        self.ai_apply_devil_cat(player)
+                        self.show_toast(f"{player.name} used Devil Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Starlight Cat":
+                        player.cat_cards.remove(card)
+                        player.starlight_round = self.game.round_num
+                        purple_indices = [
+                            i for i, die in enumerate(self.game.current_hand) if die.color == "purple"
+                        ]
+                        if purple_indices:
+                            self.start_roll_animation(
+                                indices=purple_indices,
+                                on_finish=self.finish_reroll_animation,
+                            )
+                        else:
+                            self.update_status()
+                            self.render_hand()
+                        self.show_toast(f"{player.name} used Starlight Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Momma Cat":
+                        if self.momma_uses >= 2:
+                            continue
+                        player.cat_cards.remove(card)
+                        self.momma_uses += 1
+                        self.apply_momma_cat(player, uses=1)
+                        self.show_toast(f"{player.name} used Momma Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Feral Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_feral_cat(player)
+                        self.show_toast(f"{player.name} used Feral Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Cat Burglar":
+                        player.cat_cards.remove(card)
+                        self.ai_steal_dog_card(player)
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Bat Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_bat_cat(player)
+                        self.show_toast(f"{player.name} used Bat Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Lap Cat":
+                        if getattr(player, "rerolls_blocked", False):
+                            continue
+                        player.cat_cards.remove(card)
+                        if self.game:
+                            self.game.rerolls_left += 1
+                        self.show_toast(f"{player.name} used Lap Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Stray Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_stray_cat(player)
+                        self.show_toast(f"{player.name} used Stray Cat!")
+                        self.trigger_shadow_dawg(player)
+                    elif card.name == "Fish Bone Cat":
+                        player.cat_cards.remove(card)
+                        player.bag.add("purple", 1)
+                        self.add_log(f"{player.name} used Fish Bone Cat: +1 purple die to bag.")
+                        self.show_toast(f"{player.name} used Fish Bone Cat!")
+                        self.trigger_shadow_dawg(player)
+                        self.update_table_view()
+                        self.update_status()
+                        used_any = True
+                        used_total = True
+                        continue
+                    elif card.name == "Regal Cat":
+                        before = player.kibbles
+                        if game.use_cat_card(player, card):
+                            gain = player.kibbles - before
+                            self.add_log(
+                                f"{player.name} used Regal Cat: +{gain:.1f} kibbles (capped at 6)."
+                            )
+                            self.show_toast(
+                                f"{player.name} used Regal Cat (+{gain:.1f} kibbles)!"
+                            )
+                            self.trigger_shadow_dawg(player)
+                            self.update_table_view()
+                            self.update_status()
+                        used_any = True
+                        used_total = True
+                        continue
+                    elif card.name == "Territorial Cat":
+                        player.cat_cards.remove(card)
+                        if self.game:
+                            targets = [
+                                p
+                                for p in self.players
+                                if p is not player and (p.dog_cards or p.stolen_dog_cards)
+                            ]
+                            if targets:
+                                target = self.ai_pick_disruption_target(targets)
+                                if not target:
+                                    target = max(targets, key=lambda p: p.kibbles)
+                                candidates = target.dog_cards + target.stolen_dog_cards
+                                if candidates:
+                                    best_card = max(
+                                        candidates,
+                                        key=lambda c: self.ai_score_dog_card(target, c),
+                                    )
+                                    target.blocked_dog_card = best_card
+                                    target.blocked_dog_round = self.game.round_num + 1
+                                    target.blocked_dog_active = False
+                                    self.add_log(
+                                        f"{player.name} used Territorial Cat on {target.name}'s {best_card.name} (next round)."
+                                    )
+                                    reason = None
+                                    if self.get_human_player() is target:
+                                        reason = "disable your best dog"
+                                    self.ai_reasoned_toast(
+                                        player,
+                                        target,
+                                        f"{player.name} disabled {target.name}'s {best_card.name}!",
+                                        reason,
+                                    )
+                                    self.trigger_shadow_dawg(player)
+                                    self.update_table_view()
+                                    self.update_status()
+                        used_any = True
+                        continue
+                    elif card.name == "Dogs Best Friend":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_dogs_best_friend(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Cat Tackle":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_cat_tackle(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Raccoon Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_raccoon_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Narc Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_narc_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Greedy Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_greedy_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Squirrel Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_squirrel_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Shrodinger's Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_schrodinger_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Thief in the Night":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_thief_night(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Pummeling Puma":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_pummeling_puma(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Void Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_void_cat(player, card)
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Lion Cut Cat":
+                        if not player.dog_cards:
+                            continue
+                        player.cat_cards.remove(card)
+                        self.ai_apply_lioncut(player, card)
+                        self.show_toast(f"{player.name} used Lion Cut Cat!")
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    elif card.name == "Focus Cat":
+                        player.cat_cards.remove(card)
+                        self.ai_apply_focus_cat(player, card)
+                        self.show_toast(f"{player.name} used Focus Cat!")
+                        self.trigger_shadow_dawg(player)
+                        used_any = True
+                        continue
+                    else:
+                        game.use_cat_card(player, card)
+                        self.show_toast(f"{player.name} used {card.name}!")
+                        self.trigger_shadow_dawg(player)
+                    self.add_log(f"{player.name} used {card.name}.")
+                    self.update_table_view()
+                    self.update_status()
+                    used_any = True
+                    used_total = True
+        return used_total
+    def ai_should_use_cat_card(self, player: Player, card: Card) -> bool:
+        game = self.game
+        if not game:
+            return False
+        high_impact_roll = {
+            "Momma Cat",
+            "Nimble Cat",
+            "Lap Cat",
+            "Devil Cat",
+            "Starlight Cat",
+            "Shrodinger's Cat",
+        }
+        shadow_threat = any(
+            p is not player
+            and any(
+                d.name == "Shadow Dawg" for d in (p.dog_cards + p.stolen_dog_cards)
+            )
+            and getattr(p, "shadow_dawg_triggered_round", 0) != game.round_num
+            for p in self.players
+        )
+        behind = False
+        if self.players:
+            leader_score = max(p.total_score for p in self.players)
+            behind = player.total_score < leader_score
+        def allow_with_shadow(decision: bool) -> bool:
+            if not decision:
+                return False
+            if not shadow_threat or behind:
+                return True
+            return self.ai_score_cat_card(player, card) >= 1.4
+        if getattr(player, "rerolls_blocked", False) and card.name in ("Nimble Cat", "Lap Cat", "Devil Cat"):
+            return False
+        preferred_colors = set()
+        if player.objective_color:
+            preferred_colors.add(player.objective_color)
+        has_purple = any(
+            d.name == "Psychedelic Dawg"
+            for d in (player.dog_cards + player.stolen_dog_cards)
+        )
+        potential = self.ai_hand_potential(game.current_hand, player)
+        low_color = min(self.ai_color_weights(player).get(c, 0) for c in BASE_COLORS)
+        has_pattern_boost = any(
+            c.name in ("4 Shot Saluki", "Dawg House")
+            for c in (player.dog_cards + player.stolen_dog_cards)
+        )
+        if card.name in high_impact_roll and game.current_hand and game.rerolls_left > 1:
+            return False
+
+        disrupt_now = self.ai_should_disrupt(player)
+        if card.name == "Cat Burglar":
+            opponent_cards = [
+                c
+                for p in self.players
+                if p is not player
+                for c in (p.dog_cards + p.stolen_dog_cards)
+            ]
+            return allow_with_shadow(disrupt_now and bool(opponent_cards))
+        if card.name == "Feral Cat":
+            return allow_with_shadow(has_purple or low_color > 0.15 or player.is_ai)
+        if card.name == "Stray Cat":
+            return allow_with_shadow(bool(preferred_colors))
+        if card.name == "Pummeling Puma":
+            return allow_with_shadow(
+                disrupt_now and any(p is not player for p in self.players)
+            )
+        if card.name == "Fish Bone Cat":
+            return allow_with_shadow(True)
+        if card.name == "Void Cat":
+            return allow_with_shadow(
+                disrupt_now
+                and any(p is not player and p.cat_cards for p in self.players)
+            )
+        if card.name == "Lion Cut Cat":
+            return allow_with_shadow(
+                bool(player.dog_cards) and len(player.dog_cards) >= max(1, game.max_dog_cards - 1)
+            )
+        if card.name == "Bat Cat":
+            non_preferred = [c for c in BASE_COLORS if c not in preferred_colors]
+            return allow_with_shadow(
+                any(player.bag.counts.get(c, 0) > 0 for c in non_preferred)
+            )
+        if card.name in ("Momma Cat", "Nimble Cat", "Lap Cat", "Devil Cat"):
+            if game.current_hand:
+                return allow_with_shadow(game.rerolls_left <= 1)
+            if potential["max_count"] >= 3 or potential["pairs"] >= 2 or potential["straight_draw"]:
+                return allow_with_shadow(True)
+            return allow_with_shadow(has_pattern_boost)
+        if card.name in ("Present Cat", "Regal Cat"):
+            return allow_with_shadow(True)
+        if card.name == "Territorial Cat":
+            opponents = [
+                p
+                for p in self.players
+                if p is not player and (p.dog_cards or p.stolen_dog_cards)
+            ]
+            return allow_with_shadow(disrupt_now and bool(opponents))
+        if card.name == "Dogs Best Friend":
+            return allow_with_shadow(
+                any(p.dog_cards or p.stolen_dog_cards for p in self.players)
+            )
+        if card.name == "Cat Tackle":
+            return allow_with_shadow(
+                disrupt_now and any(p is not player for p in self.players)
+            )
+        if card.name == "Raccoon Cat":
+            return allow_with_shadow(
+                disrupt_now
+                and any(p is not player and p.kibbles >= 1 for p in self.players)
+            )
+        if card.name == "Narc Cat":
+            return allow_with_shadow(
+                disrupt_now
+                and any(
+                    p is not player and p.bag.counts.get("purple", 0) > 0
+                    for p in self.players
+                )
+            )
+        if card.name == "Greedy Cat":
+            return allow_with_shadow(disrupt_now and bool(self.players))
+        if card.name == "Squirrel Cat":
+            return allow_with_shadow(disrupt_now and any(p is not player for p in self.players))
+        if card.name == "Shrodinger's Cat":
+            return allow_with_shadow(bool(game.current_hand) and game.rerolls_left <= 0)
+        if card.name == "Thief in the Night":
+            return allow_with_shadow(
+                any(
+                    p is not player and (p.cat_cards or p.dog_cards or p.stolen_dog_cards)
+                    for p in self.players
+                )
+            )
+        if card.name == "Starlight Cat":
+            return allow_with_shadow(
+                bool(game.current_hand)
+                and any(die.color == "purple" for die in game.current_hand)
+                and game.rerolls_left <= 1
+            )
+        if card.name == "Focus Cat":
+            if not player.objective_color or not game.current_hand:
+                return False
+            return allow_with_shadow(
+                any(
+                    self.effective_die_color(die, player)
+                    not in (player.objective_color, "purple")
+                    for die in game.current_hand
+                )
+            )
+        return False
+
+    def ai_dog_synergy_score(self, card: Card, preferred_colors: set, has_purple: bool) -> int:
+        if card.name == "Psychedelic Dawg" and has_purple:
+            return 4
+        if card.name in ("Best Buddies", "Who Let the Dawgs Out?") and preferred_colors:
+            return 3
+        return 2
+
+    def ai_apply_nimble_reroll(self, player: Player) -> None:
+        game = self.game
+        if not game:
+            return
+        indices = self.ai_choose_reroll_indices(game.current_hand, player)
+        indices = indices[:2]
+        for idx in indices:
+            die = game.current_hand[idx]
+            game.current_hand[idx] = type(die)(die.color, random.randint(1, 6))
+        self.start_roll_animation(indices=indices, on_finish=self.finish_reroll_animation)
+
+    def ai_apply_devil_cat(self, player: Player) -> None:
+        game = self.game
+        if not game or not game.current_hand:
+            return
+        indices = sorted(
+            range(len(game.current_hand)),
+            key=lambda i: game.current_hand[i].value,
+        )
+        indices = indices[:3]
+        for idx in indices:
+            die = game.current_hand[idx]
+            game.current_hand[idx] = type(die)(die.color, 6)
+        self.start_roll_animation(indices=indices, on_finish=self.finish_reroll_animation)
+
+    def ai_apply_stray_cat(self, player: Player) -> None:
+        preferred_colors = []
+        if player.objective_color:
+            preferred_colors.append(player.objective_color)
+        if preferred_colors:
+            choices = [preferred_colors[0], preferred_colors[0]]
+        else:
+            choices = [random.choice(BASE_COLORS), random.choice(BASE_COLORS)]
+        for color in choices:
+            player.bag.add(color, 1)
+
+    def ai_apply_bat_cat(self, player: Player) -> None:
+        preferred_colors = set()
+        if player.objective_color:
+            preferred_colors.add(player.objective_color)
+        if not preferred_colors:
+            return
+        removal_candidates = []
+        for color in BASE_COLORS:
+            if color not in preferred_colors:
+                removal_candidates.extend([color] * player.bag.counts.get(color, 0))
+        random.shuffle(removal_candidates)
+        for color in removal_candidates[:2]:
+            if player.bag.counts.get(color, 0) > 0:
+                player.bag.counts[color] -= 1
+
+    def ai_apply_feral_cat(self, player: Player) -> None:
+        counts = {c: player.bag.counts.get(c, 0) for c in BASE_COLORS}
+        if not any(counts.values()):
+            return
+        best_color = max(counts, key=counts.get)
+        if counts[best_color] > 0:
+            player.bag.counts[best_color] -= 1
+            player.bag.counts["purple"] += 1
+
+    def ai_apply_cat_tackle(self, player: Player, card: Card) -> None:
+        targets = [p for p in self.players if p is not player]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.total_score)
+        weights = self.ai_color_weights(target)
+        protected = set()
+        if target.objective_color:
+            protected.add(target.objective_color)
+        if any(
+            c.name == "Psychedelic Dawg"
+            for c in (target.dog_cards + target.stolen_dog_cards)
+        ):
+            protected.add("purple")
+        candidates = [c for c in BASE_COLORS if c not in protected] or list(BASE_COLORS)
+        ordered = sorted(candidates, key=lambda c: weights.get(c, 0))
+        choices = [ordered[0], ordered[1] if len(ordered) > 1 else ordered[0]]
+        for color in choices:
+            target.bag.add(color, 1)
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Cat Tackle: added dice to {target.name}'s bag."
+        )
+        reason = None
+        human = self.get_human_player()
+        if human is target:
+            if target.objective_color:
+                reason = f"dilute your {target.objective_color} focus"
+            elif any(
+                c.name == "Psychedelic Dawg"
+                for c in (target.dog_cards + target.stolen_dog_cards)
+            ) or target.bag.counts.get("purple", 0) > 0:
+                reason = "dilute your purple engine"
+            else:
+                reason = "clog your bag"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} used Cat Tackle on {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_raccoon_cat(self, player: Player, card: Card) -> None:
+        targets = [p for p in self.players if p is not player and p.kibbles >= 1]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.kibbles)
+        before = int(target.kibbles)
+        before_player = int(player.kibbles)
+        stolen = min(2, int(target.kibbles))
+        target.kibbles -= stolen
+        player.kibbles += stolen
+        self.apply_grudge_from_theft(target)
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Raccoon Cat: stole {stolen} kibble from {target.name}."
+        )
+        reason = None
+        human = self.get_human_player()
+        if human is target:
+            if before >= before_player + 3:
+                reason = "cut your kibble lead"
+            elif before >= 2:
+                reason = "steal your kibbles"
+            else:
+                reason = "slow your economy"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} stole {stolen} kibble from {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_narc_cat(self, player: Player, card: Card) -> None:
+        targets = [
+            p for p in self.players if p is not player and p.bag.counts.get("purple", 0) > 0
+        ]
+        if not targets:
+            return
+        target = max(
+            targets,
+            key=lambda p: (
+                self.ai_threat_score(p),
+                p.bag.counts.get("purple", 0),
+            ),
+        )
+        if target.bag.counts.get("purple", 0) <= 0:
+            return
+        target.bag.counts["purple"] -= 1
+        self.apply_grudge_from_theft(target)
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Narc Cat: removed 1 purple die from {target.name}."
+        )
+        reason = None
+        if self.get_human_player() is target:
+            reason = "remove your purple dice"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} removed 1 purple die from {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_greedy_cat(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        targets = [p for p in self.players if p is not player]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.total_score)
+        target.pending_roll_penalty += 1
+        target.pending_roll_penalty_round = game.round_num + 1
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Greedy Cat: {target.name} rolls 1 fewer die next round."
+        )
+        reason = None
+        if self.get_human_player() is target:
+            reason = "reduce your roll next round"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} used Greedy Cat on {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_squirrel_cat(self, player: Player, card: Card) -> None:
+        targets = [p for p in self.players if p is not player]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.total_score)
+        for _ in range(4):
+            target.bag.add(random.choice(BASE_COLORS), 1)
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Squirrel Cat: added 4 random dice to {target.name}'s bag."
+        )
+        reason = None
+        if self.get_human_player() is target:
+            reason = "clog your bag"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} stuffed {target.name}'s bag with dice!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_schrodinger_cat(self, player: Player, card: Card) -> None:
+        if not self.game or not self.game.current_hand:
+            return
+        if getattr(player, "rerolls_blocked", False):
+            return
+        if self.schrodinger_pending:
+            return
+        self.schrodinger_pending = player
+        self.add_log(f"{player.name} used Shrodinger's Cat: will reroll at scoring.")
+        self.show_toast(f"{player.name} queued Shrodinger's Cat!")
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_thief_night(self, player: Player, card: Card) -> None:
+        targets = [
+            p
+            for p in self.players
+            if p is not player and (p.cat_cards or p.dog_cards or p.stolen_dog_cards)
+        ]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.total_score)
+        choices = []
+        for c in target.dog_cards + target.stolen_dog_cards:
+            choices.append(("dog", c))
+        for c in target.cat_cards:
+            choices.append(("cat", c))
+        if not choices:
+            return
+        def choice_score(item) -> float:
+            kind, c = item
+            if kind == "dog":
+                return self.ai_score_dog_card(player, c)
+            return self.ai_score_cat_card(player, c)
+        kind, picked = max(choices, key=choice_score)
+        if kind == "dog":
+            if picked in target.dog_cards:
+                target.dog_cards.remove(picked)
+            else:
+                target.stolen_dog_cards.remove(picked)
+            player.stolen_dog_cards.append(picked)
+        else:
+            target.cat_cards.remove(picked)
+            player.cat_cards.append(picked)
+        self.apply_grudge_from_theft(target)
+        if self.profile_data is not None:
+            self.profile_data["banked_kibbles"] = int(self.profile_data.get("banked_kibbles", 0)) + 3
+            self.save_profile()
+        self.add_log(f"{player.name} used Thief in the Night: stole {picked.name} from {target.name}.")
+        reason = None
+        if self.get_human_player() is target:
+            reason = "steal your best card and bank kibbles"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} stole {picked.name} from {target.name}!",
+            reason,
+        )
+        self.show_bank_toast(f"{player.name} banked 3 kibbles!")
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_pummeling_puma(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game:
+            return
+        targets = [p for p in self.players if p is not player]
+        if not targets:
+            return
+        target = self.ai_pick_disruption_target(targets)
+        if not target:
+            target = max(targets, key=lambda p: p.total_score)
+        target.pending_reroll_block = True
+        target.pending_reroll_block_round = game.round_num + 1
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Pummeling Puma: {target.name}'s rerolls blocked next round."
+        )
+        reason = None
+        if self.get_human_player() is target:
+            recent = self.get_recent_round_score(target)
+            if recent >= 5:
+                reason = "you had a strong round"
+            else:
+                reason = "block your rerolls"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} used Pummeling Puma on {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_void_cat(self, player: Player, card: Card) -> None:
+        targets = [p for p in self.players if p is not player and p.cat_cards]
+        if not targets:
+            return
+        target = max(
+            targets,
+            key=lambda p: (self.ai_threat_score(p), len(p.cat_cards)),
+        )
+        stolen = target.cat_cards.pop(0)
+        player.cat_cards.append(stolen)
+        self.apply_grudge_from_theft(target)
+        self.add_log(f"{player.name} used Void Cat: stole {stolen.name} from {target.name}.")
+        reason = None
+        if self.get_human_player() is target:
+            reason = "steal your cat card"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} stole {stolen.name} from {target.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_lioncut(self, player: Player, card: Card) -> None:
+        if not player.dog_cards:
+            return
+        candidate = min(player.dog_cards, key=lambda c: self.ai_score_dog_card(player, c))
+        player.dog_cards.remove(candidate)
+        player.stolen_dog_cards.append(candidate)
+        self.add_log(f"{player.name} used Lion Cut Cat: moved {candidate.name} to stolen dogs.")
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_focus_cat(self, player: Player, card: Card) -> None:
+        game = self.game
+        if not game or not player.objective_color or not game.current_hand:
+            return
+        candidates = [
+            die
+            for die in game.current_hand
+            if self.effective_die_color(die, player)
+            not in (player.objective_color, "purple")
+        ]
+        if not candidates:
+            return
+        die = candidates[0]
+        player.focus_overrides[id(die)] = player.objective_color
+        if self.game:
+            self.game.cat_deck.add(card)
+        self.add_log(
+            f"{player.name} used Focus Cat: one die counts as {player.objective_color} this round."
+        )
+        self.trigger_shadow_dawg(player)
+        if self.hand_revealed:
+            self.scoring_highlight_indices = self.get_scoring_indices(game.current_hand, player)
+        self.render_hand()
+        self.update_table_view()
+        self.update_status()
+
+    def ai_apply_dogs_best_friend(self, player: Player, cat_card: Card) -> None:
+        candidates = []
+        for target in self.players:
+            for card in target.dog_cards + target.stolen_dog_cards:
+                candidates.append((card, target))
+        if not candidates:
+            return
+        best_card, owner = max(
+            candidates, key=lambda c: self.ai_score_dog_card(player, c[0])
+        )
+        player.temp_dog_cards.append(
+            Card(best_card.name, best_card.kind, best_card.cost, dict(best_card.effect), best_card.description)
+        )
+        if self.game:
+            self.game.cat_deck.add(cat_card)
+        self.add_log(
+            f"{player.name} used Dogs Best Friend: copied {best_card.name} for this round."
+        )
+        reason = None
+        if self.get_human_player() is owner:
+            reason = "copy your strongest dog"
+        self.ai_reasoned_toast(
+            player,
+            owner,
+            f"{player.name} copied {best_card.name}!",
+            reason,
+        )
+        self.update_table_view()
+        self.update_status()
+
+    def ai_steal_dog_card(self, player: Player) -> None:
+        targets = [p for p in self.players if p is not player and (p.dog_cards or p.stolen_dog_cards)]
+        if not targets:
+            return
+        leader_score = max((p.total_score for p in self.players), default=0.0)
+        best = None
+        for target in targets:
+            pool = target.dog_cards + target.stolen_dog_cards
+            for card in pool:
+                score = self.ai_score_dog_card(player, card)
+                if target.total_score >= leader_score:
+                    score += 0.5
+                score += self.ai_threat_score(target) * 0.05
+                if best is None or score > best[0]:
+                    best = (score, target, card)
+        if not best:
+            return
+        _score, target, card = best
+        if card in target.dog_cards:
+            target.dog_cards.remove(card)
+        else:
+            target.stolen_dog_cards.remove(card)
+        self.apply_grudge_from_theft(target)
+        player.stolen_dog_cards.append(card)
+        reason = None
+        if self.get_human_player() is target:
+            reason = "steal your strongest dog"
+        self.ai_reasoned_toast(
+            player,
+            target,
+            f"{player.name} stole {card.name} from {target.name}!",
+            reason,
+        )
+
+    def show_end_game_screen(self, text: str) -> None:
+        self.end_game_active = True
+        self.hide_table_frames()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        self.log_frame.pack_forget()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        self.dice_bank_frame.pack_forget()
+        self.bag_view_frame.pack_forget()
+        self.cat_burglar_frame.pack_forget()
+        self.render_end_game_ranks()
+        allow_new_game_plus = self.can_enter_new_game_plus()
+        if hasattr(self, "end_game_new_game_btn"):
+            if not self.end_game_new_game_btn.winfo_ismapped():
+                self.end_game_new_game_btn.pack(side="left", padx=4)
+            self.end_game_new_game_btn.config(
+                state="normal" if allow_new_game_plus else "disabled"
+            )
+            img = (
+                self.end_game_new_game_img
+                if allow_new_game_plus
+                else (self.end_game_new_game_img_disabled or self.end_game_new_game_img)
+            )
+            if img:
+                self.end_game_new_game_btn.config(image=img)
+                self.end_game_new_game_btn.image = img
+        self.end_game_text.configure(state="normal")
+        self.end_game_text.configure(height=int(self.density("end_text_height", 18)))
+        self.end_game_text.delete("1.0", "end")
+        self.end_game_text.insert("end", text, "center")
+        self.end_game_text.configure(state="disabled")
+        self.player_panel_container.pack_forget()
+        self.end_game_frame.pack(fill="both", expand=True, pady=10)
+        self.update_pause_button_visibility()
+
+    def show_final_credits_screen(self) -> None:
+        self.end_game_active = True
+        self.hide_table_frames()
+        self.hand_frame.pack_forget()
+        self.controls_frame.pack_forget()
+        self.cat_frame.pack_forget()
+        self.shop_frame.place_forget()
+        self.shop_frame.pack_forget()
+        self.shop_backdrop.place_forget()
+        self.log_frame.pack_forget()
+        self.rulebook_frame.pack_forget()
+        self.scorecard_frame.pack_forget()
+        self.dice_bank_frame.pack_forget()
+        self.bag_view_frame.pack_forget()
+        self.cat_burglar_frame.pack_forget()
+        if hasattr(self, "end_game_frame") and self.end_game_frame.winfo_exists():
+            self.end_game_frame.pack_forget()
+        self.player_panel_container.pack_forget()
+        self.credits_frame.pack(fill="both", expand=True, pady=10)
+        self.start_credits_scroll()
+        self.update_pause_button_visibility()
+
+    def start_credits_scroll(self) -> None:
+        if not getattr(self, "credits_canvas", None) or not self.credits_canvas.winfo_exists():
+            return
+        if self.credits_scroll_job:
+            try:
+                self.root.after_cancel(self.credits_scroll_job)
+            except tk.TclError:
+                pass
+            self.credits_scroll_job = None
+        canvas = self.credits_canvas
+        canvas.delete("all")
+        lines = [
+            "Created by Team Jibby!",
+            "Sounds and music provided by Freesound.org",
+            "Coding provided by Codex",
+            "Artwork provided by OpenAI",
+        ]
+        text = "\n\n".join(lines)
+        canvas.update_idletasks()
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        start_y = height + 40
+        self.credits_text_id = canvas.create_text(
+            width // 2,
+            start_y,
+            text=text,
+            font=self.theme["body_font"],
+            fill=self.theme["text"],
+            justify="center",
+        )
+
+        def step() -> None:
+            if not canvas.winfo_exists() or not self.credits_text_id:
+                return
+            canvas.move(self.credits_text_id, 0, -1)
+            bbox = canvas.bbox(self.credits_text_id)
+            if bbox and bbox[3] < 0:
+                self.credits_scroll_job = None
+                return
+            self.credits_scroll_job = self.root.after(30, step)
+
+        step()
+
+    def can_enter_new_game_plus(self) -> bool:
+        standings = getattr(self, "end_game_standings", None)
+        return bool(standings and self.players and standings[0] is self.players[0])
+
+    def open_kibble_bank(self, next_action: str) -> None:
+        if not self.players:
+            return
+        if next_action == "continue":
+            if not self.can_enter_new_game_plus():
+                self.show_toast("You must get first to enter New Game+.")
+                return
+        if self.kibble_bank_frame and self.kibble_bank_frame.winfo_exists():
+            self.kibble_bank_frame.destroy()
+        self.kibble_bank_action = next_action
+        self.end_game_frame.pack_forget()
+        self.kibble_bank_frame = tk.Frame(self.root, bg=self.theme["panel_dark"])
+        self.kibble_bank_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.update_pause_button_visibility()
+
+        title = tk.Label(
+            self.kibble_bank_frame,
+            text="Kibble Bank",
+            font=self.theme["header_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        title.pack(pady=(18, 6))
+
+        player = self.players[0]
+        current_kibbles = int(player.kibbles)
+        banked_total = int(self.profile_data.get("banked_kibbles", 0)) if self.profile_data else 0
+
+        info = tk.Label(
+            self.kibble_bank_frame,
+            text=f"Current kibbles: {current_kibbles}   |   Banked total: {banked_total}",
+            font=self.theme["body_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["muted"],
+        )
+        info.pack(pady=(0, 12))
+
+        if not self.profile_data:
+            tk.Label(
+                self.kibble_bank_frame,
+                text="Load a profile to bank kibbles.",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["muted"],
+            ).pack(pady=(0, 10))
+            max_bank = 0
+        else:
+            max_bank = current_kibbles
+
+        self.kibble_bank_amount_var = tk.IntVar(value=0)
+        amount_label = tk.Label(
+            self.kibble_bank_frame,
+            text=f"Banking: 0 / {max_bank}",
+            font=self.theme["subheader_font"],
+            bg=self.theme["panel_dark"],
+            fg=self.theme["text"],
+        )
+        amount_label.pack(pady=(0, 8))
+
+        def update_label(*_args) -> None:
+            amount_label.config(
+                text=f"Banking: {self.kibble_bank_amount_var.get()} / {max_bank}"
+            )
+
+        slider_track = self.ui_images.get("slider_track")
+        slider_knob = self.ui_images.get("slider_knob")
+        if slider_track:
+            slider_track = self.scale_image_percent(slider_track, self.scale_ui_percent(0.25))
+        if slider_knob:
+            slider_knob = self.scale_image_percent(slider_knob, self.scale_ui_percent(0.25))
+        track_w = slider_track.width() if slider_track else 520
+        track_h = slider_track.height() if slider_track else 22
+        knob_w = slider_knob.width() if slider_knob else 16
+        knob_h = slider_knob.height() if slider_knob else 16
+        slider_canvas = tk.Canvas(
+            self.kibble_bank_frame,
+            width=track_w,
+            height=max(track_h, knob_h) + 10,
+            bg=self.theme["panel_dark"],
+            highlightthickness=0,
+        )
+        slider_canvas.track_image = slider_track
+        slider_canvas.knob_image = slider_knob
+        slider_canvas.pack(pady=(0, 10))
+        if slider_track:
+            slider_canvas.create_image(track_w // 2, (max(track_h, knob_h) // 2) + 2, image=slider_track)
+        else:
+            slider_canvas.create_line(
+                8,
+                (max(track_h, knob_h) // 2) + 2,
+                track_w - 8,
+                (max(track_h, knob_h) // 2) + 2,
+                fill=self.theme["border"],
+                width=4,
+                capstyle="round",
+            )
+        knob_id = slider_canvas.create_image(0, 0, image=slider_knob) if slider_knob else slider_canvas.create_oval(
+            0, 0, knob_w, knob_h, fill=self.theme["accent"], outline=""
+        )
+        if slider_knob:
+            slider_canvas.itemconfig(knob_id, image=slider_knob)
+        min_x = 8 + knob_w // 2
+        max_x = track_w - 8 - knob_w // 2
+        center_y = (max(track_h, knob_h) // 2) + 2
+
+        def value_to_x(value: int) -> int:
+            if max_bank <= 0 or max_x <= min_x:
+                return min_x
+            ratio = max(0.0, min(1.0, value / max_bank))
+            return int(min_x + (max_x - min_x) * ratio)
+
+        def x_to_value(x: int) -> int:
+            if max_bank <= 0 or max_x <= min_x:
+                return 0
+            ratio = max(0.0, min(1.0, (x - min_x) / (max_x - min_x)))
+            return int(round(ratio * max_bank))
+
+        def update_knob_from_value() -> None:
+            x = value_to_x(int(self.kibble_bank_amount_var.get()))
+            slider_canvas.coords(knob_id, x, center_y)
+
+        def set_value_from_event(event) -> None:
+            if max_bank == 0:
+                return
+            new_val = x_to_value(event.x)
+            self.kibble_bank_amount_var.set(new_val)
+            update_label()
+            update_knob_from_value()
+
+        slider_canvas.bind("<Button-1>", set_value_from_event)
+        slider_canvas.bind("<B1-Motion>", set_value_from_event)
+        update_knob_from_value()
+        self.kibble_bank_amount_var.trace_add("write", update_label)
+
+        quick = tk.Frame(self.kibble_bank_frame, bg=self.theme["panel_dark"])
+        quick.pack(pady=(0, 10))
+        bank_all_img = self.ui_images.get("bank_all")
+        bank_all_btn = tk.Button(
+            quick,
+            text="Bank All" if not bank_all_img else "",
+            image=bank_all_img,
+            command=lambda: self.kibble_bank_amount_var.set(max_bank),
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if bank_all_img:
+            bank_all_btn.image = bank_all_img
+        bank_all_btn.pack(side="left", padx=6)
+        bank_none_img = self.ui_images.get("bank_none")
+        bank_none_btn = tk.Button(
+            quick,
+            text="Bank None" if not bank_none_img else "",
+            image=bank_none_img,
+            command=lambda: self.kibble_bank_amount_var.set(0),
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=10,
+            pady=4,
+        )
+        if bank_none_img:
+            bank_none_btn.image = bank_none_img
+        bank_none_btn.pack(side="left", padx=6)
+
+        actions = tk.Frame(self.kibble_bank_frame, bg=self.theme["panel_dark"])
+        actions.pack(pady=(10, 0))
+        continue_img = self.ui_images.get("continue")
+        continue_btn = tk.Button(
+            actions,
+            text="Continue" if not continue_img else "",
+            image=continue_img,
+            command=self.confirm_kibble_bank,
+            font=self.theme["body_font"],
+            bg=self.theme["btn"],
+            fg=self.theme["btn_text"],
+            activebackground=self.theme["btn_active"],
+            relief="flat",
+            padx=14,
+            pady=6,
+        )
+        if continue_img:
+            continue_btn.image = continue_img
+        continue_btn.pack()
+
+        update_label()
+
+    def confirm_kibble_bank(self) -> None:
+        if not self.players:
+            return
+        if self.kibble_bank_action == "continue" and not self.can_enter_new_game_plus():
+            self.show_toast("You must get first to enter New Game+.")
+            if self.kibble_bank_frame and self.kibble_bank_frame.winfo_exists():
+                self.kibble_bank_frame.destroy()
+            self.kibble_bank_frame = None
+            self.kibble_bank_action = None
+            if self.end_game_frame and self.end_game_frame.winfo_exists():
+                self.end_game_frame.pack(fill="both", expand=True, pady=10)
+            self.update_pause_button_visibility()
+            return
+        player = self.players[0]
+        amount = int(self.kibble_bank_amount_var.get()) if self.kibble_bank_amount_var else 0
+        max_bank = int(player.kibbles)
+        amount = max(0, min(amount, max_bank))
+        if self.profile_data and amount > 0:
+            self.profile_data["banked_kibbles"] = self.profile_data.get("banked_kibbles", 0) + amount
+            player.kibbles = max(0, player.kibbles - amount)
+            self.save_profile()
+            display_name = self.profile_data.get("name", player.name)
+            kibble_label = "Kibble" if amount == 1 else "Kibbles"
+            self.show_bank_toast(f"{display_name} banked {amount} {kibble_label}!")
+        if self.kibble_bank_frame and self.kibble_bank_frame.winfo_exists():
+            self.kibble_bank_frame.destroy()
+        action = self.kibble_bank_action
+        self.kibble_bank_action = None
+        if action == "continue":
+            self.continue_game()
+        else:
+            self.restart_to_setup()
+
+    def hide_table_frames(self) -> None:
+        for frame in (self.top_frame, self.left_frame, self.right_frame, self.bottom_frame):
+            if frame.winfo_ismapped():
+                frame.grid_remove()
+
+    def show_table_frames(self) -> None:
+        if not self.top_frame.winfo_ismapped() and not self.compact_player_panels:
+            self.top_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        if not self.left_frame.winfo_ismapped() and not self.compact_player_panels:
+            self.left_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        if not self.right_frame.winfo_ismapped() and not self.compact_player_panels:
+            self.right_frame.grid(row=1, column=2, sticky="nsew", padx=5, pady=5)
+        if not self.bottom_frame.winfo_ismapped():
+            self.bottom_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=(0, 5), columnspan=3)
+
+    def update_pause_button_visibility(self) -> None:
+        if not getattr(self, "pause_button_frame", None):
+            return
+        if not self.pause_button_frame.winfo_exists():
+            return
+        has_main = bool(getattr(self, "main_frame", None) and self.main_frame.winfo_exists())
+        in_first_phase = bool(self.first_player_frame and self.first_player_frame.winfo_exists())
+        should_show = bool(
+            has_main
+            and self.game_layout_active
+            and not self.in_shop
+            and not self.end_game_active
+            and not in_first_phase
+        )
+        if should_show:
+            self.pause_button_frame.place(x=4, y=4)
+            self.pause_button_frame.lift()
+        else:
+            self.pause_button_frame.place_forget()
+
+    def render_end_game_ranks(self) -> None:
+        if not hasattr(self, "end_game_rank_frame"):
+            return
+        for widget in self.end_game_rank_frame.winfo_children():
+            widget.destroy()
+        standings = getattr(self, "end_game_standings", None)
+        if not standings:
+            return
+        rank_images = {
+            1: self.ui_images.get("rank_1"),
+            2: self.ui_images.get("rank_2"),
+            3: self.ui_images.get("rank_3"),
+            4: self.ui_images.get("rank_4"),
+        }
+        rank_scale = float(self.density("end_rank_scale", 1.0))
+        rank_padx = max(4, int(self.density("end_rank_padx", 12)))
+        for idx, player in enumerate(standings[:4], start=1):
+            col = tk.Frame(self.end_game_rank_frame, bg=self.theme["panel_dark"])
+            col.pack(side="left", padx=rank_padx)
+            img = rank_images.get(idx)
+            if img:
+                if rank_scale < 1.0:
+                    img = self.scale_image_percent(img, rank_scale)
+                lbl = tk.Label(col, image=img, bg=self.theme["panel_dark"])
+                lbl.image = img
+                lbl.pack()
+            display_name = player.name
+            if idx == 1 and self.players and player is self.players[0] and self.profile_data:
+                display_name = self.profile_data.get("name", player.name)
+            tk.Label(
+                col,
+                text=f"{display_name}\n{player.total_score:.1f}",
+                font=self.theme["body_font"],
+                bg=self.theme["panel_dark"],
+                fg=self.theme["text"],
+                justify="center",
+            ).pack(anchor="center")
+
+    def open_rulebook_window(self) -> None:
+        if hasattr(self, "setup_frame") and self.setup_frame.winfo_exists():
+            self.setup_frame.destroy()
+        self.stop_menu_audio()
+        if hasattr(self, "rulebook_screen") and self.rulebook_screen.winfo_exists():
+            self.rulebook_screen.lift()
+            return
+
+        self.rulebook_screen = tk.Frame(self.root, bg=self.theme["bg"])
+        self.rulebook_screen.pack(fill="both", expand=True, padx=0, pady=0)
+
+        content = tk.Frame(self.rulebook_screen, bg=self.theme["bg"])
+        content.pack(fill="both", expand=True, padx=0, pady=0)
+
+        header = tk.Frame(content, bg=self.theme["bg"])
+        header.pack(fill="x", pady=(0, 10))
+        header_img = self.ui_images.get("rulebook")
+        if header_img:
+            header_label = tk.Label(header, image=header_img, bg=self.theme["bg"])
+            header_label.image = header_img
+            header_label.pack()
+        else:
+            tk.Label(
+                header,
+                text="Rulebook",
+                font=self.theme["header_font"],
+                bg=self.theme["bg"],
+                fg=self.theme["text"],
+            ).pack()
+
+        body = tk.Frame(content, bg=self.theme["bg"])
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        scrollbar = tk.Scrollbar(
+            body,
+            orient="vertical",
+            width=0,
+            bg=self.theme["bg"],
+            troughcolor=self.theme["bg"],
+            activebackground=self.theme["bg"],
+            highlightbackground=self.theme["bg"],
+            relief="flat",
+            borderwidth=0,
+        )
+        text = tk.Text(
+            body,
+            wrap="word",
+            state="normal",
+            font=self.theme["body_font"],
+            bg=self.theme["bg"],
+            fg=self.theme["text"],
+            yscrollcommand=scrollbar.set,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            highlightbackground=self.theme["bg"],
+            highlightcolor=self.theme["bg"],
+        )
+        scrollbar.config(command=text.yview)
+        text.insert("end", self.get_rulebook_text())
+        text.configure(state="disabled")
+        text.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        footer = tk.Frame(content, bg=self.theme["bg"])
+        footer.pack(pady=(12, 0))
+        back_img = self.ui_images.get("back")
+        if not back_img:
+            if not hasattr(self, "profile_action_images"):
+                self.profile_action_images = self.load_profile_action_images()
+            back_img = self.profile_action_images.get("back")
+        if back_img:
+            btn = tk.Button(
+                footer,
+                image=back_img,
+                command=self.return_to_main_menu,
+                bg=self.theme["bg"],
+                activebackground=self.theme["bg"],
+                relief="flat",
+                borderwidth=0,
+            )
+            btn.image = back_img
+        else:
+            btn = tk.Button(
+                footer,
+                text="Return to Main Menu",
+                command=self.return_to_main_menu,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=12,
+                pady=4,
+            )
+        btn.pack()
+
+    def restart_to_setup(self) -> None:
+        if hasattr(self, "main_frame"):
+            self.main_frame.destroy()
+        if self.pause_menu_frame and self.pause_menu_frame.winfo_exists():
+            self.pause_menu_frame.destroy()
+        self.pause_menu_frame = None
+        self.pause_menu_visible = False
+        self.pause_menu_panel = None
+        self.pause_options_frame = None
+        self.pause_audio_frame = None
+        self.pause_video_frame = None
+        self.pause_achievements_frame = None
+        self.root.unbind_all("<Escape>")
+        if getattr(self, "credits_scroll_job", None):
+            try:
+                self.root.after_cancel(self.credits_scroll_job)
+            except tk.TclError:
+                pass
+            self.credits_scroll_job = None
+        if getattr(self, "credits_frame", None) and self.credits_frame.winfo_exists():
+            self.credits_frame.pack_forget()
+        self.game = None
+        self.game_depth = 0
+        self.players = []
+        self.scores_this_round = []
+        self.shop_player_index = 0
+        self.pending_cat_purchase = None
+        self.pending_cat_sale = None
+        self.pending_dog_sale = None
+        self.round_history = []
+        self.scorecard_visible = False
+        self.in_shop = False
+        self.nimble_selecting = False
+        self.nimble_pending_card = None
+        self.devil_selecting = False
+        self.devil_pending_card = None
+        self.hand_revealed = False
+        self.momma_pending = 0
+        self.momma_uses = 0
+        self.shop_layout_active = False
+        self.game_layout_active = True
+        self.dice_bank_active = False
+        self.bag_view_active = False
+        self.cat_burglar_active = False
+        self.dogs_best_friend_active = False
+        self.greedy_active = False
+        self.greedy_player = None
+        self.greedy_card = None
+        self.pummeling_active = False
+        self.pummeling_player = None
+        self.pummeling_card = None
+        self.void_cat_active = False
+        self.void_cat_player = None
+        self.void_cat_card = None
+        self.lioncut_active = False
+        self.lioncut_player = None
+        self.lioncut_card = None
+        self.squirrel_active = False
+        self.squirrel_player = None
+        self.squirrel_card = None
+        self.schrodinger_pending = None
+        self.schrodinger_resolution = None
+        self.thief_night_active = False
+        self.thief_night_player = None
+        self.thief_night_card = None
+        self.hide_dogs_best_friend_picker()
+        self.shop_purchase_counts = []
+        self.rulebook_visible = False
+        self.end_game_active = False
+        self.bonus_points_by_player = {}
+        if self.kibble_bank_frame and self.kibble_bank_frame.winfo_exists():
+            self.kibble_bank_frame.destroy()
+        self.kibble_bank_frame = None
+        self.kibble_bank_action = None
+        self.kibble_bank_amount_var = None
+        self._build_setup_ui()
+        self.update_pause_button_visibility()
+
+    def continue_game(self) -> None:
+        if not self.players:
+            return
+        previous_depth = getattr(self, "game_depth", 0)
+        if previous_depth >= 12:
+            self.game_depth = previous_depth + 1
+            if self.profile_data:
+                stats = self.profile_data.setdefault("stats", {})
+                stats["game_depth"] = max(stats.get("game_depth", 0), self.game_depth)
+                self.save_profile()
+            self.show_final_credits_screen()
+            return
+        self.game_depth = min(previous_depth + 1, 12)
+        if self.profile_data:
+            stats = self.profile_data.setdefault("stats", {})
+            prior_max_depth = stats.get("game_depth", 0)
+            stats["game_depth"] = max(stats.get("game_depth", 0), self.game_depth)
+            self.save_profile()
+            if prior_max_depth < 1 and stats.get("game_depth", 0) >= 1:
+                feral = self.find_card_definition("Feral Cat", "cat")
+                if feral:
+                    self.show_card_unlock_toast(feral, "Feral Cat unlocked!")
+            if prior_max_depth < 2 and stats.get("game_depth", 0) >= 2:
+                daredevil = self.find_card_definition("Daredevil Dawg", "dog")
+                if daredevil:
+                    self.show_card_unlock_toast(daredevil, "Daredevil Dawg unlocked!")
+            if prior_max_depth < 3 and stats.get("game_depth", 0) >= 3:
+                squirrel = self.find_card_definition("Squirrel Cat", "cat")
+                if squirrel:
+                    self.show_card_unlock_toast(squirrel, "Squirrel Cat unlocked!")
+            if prior_max_depth < 4 and stats.get("game_depth", 0) >= 4:
+                rufus = self.find_card_definition("Where's Rufus", "dog")
+                if rufus:
+                    self.show_card_unlock_toast(rufus, "Where's Rufus unlocked!")
+            if prior_max_depth < 5 and stats.get("game_depth", 0) >= 5:
+                schrodinger = self.find_card_definition("Shrodinger's Cat", "cat")
+                if schrodinger:
+                    self.show_card_unlock_toast(schrodinger, "Shrodinger's Cat unlocked!")
+            if prior_max_depth < 6 and stats.get("game_depth", 0) >= 6:
+                grudge = self.find_card_definition("Grudge Dawg", "dog")
+                if grudge:
+                    self.show_card_unlock_toast(grudge, "Grudge Dawg unlocked!")
+            if prior_max_depth < 7 and stats.get("game_depth", 0) >= 7:
+                thief = self.find_card_definition("Thief in the Night", "cat")
+                if thief:
+                    self.show_card_unlock_toast(thief, "Thief in the Night unlocked!")
+            if prior_max_depth < 8 and stats.get("game_depth", 0) >= 8:
+                mythic = self.find_card_definition("Mythic Dawg", "dog")
+                if mythic:
+                    self.show_card_unlock_toast(mythic, "Mythic Dawg unlocked!")
+            if prior_max_depth < 9 and stats.get("game_depth", 0) >= 9:
+                devil = self.find_card_definition("Devil Cat", "cat")
+                if devil:
+                    self.show_card_unlock_toast(devil, "Devil Cat unlocked!")
+            if prior_max_depth < 10 and stats.get("game_depth", 0) >= 10:
+                starlight = self.find_card_definition("Starlight Cat", "cat")
+                if starlight:
+                    self.show_card_unlock_toast(starlight, "Starlight Cat unlocked!")
+            if prior_max_depth < 11 and stats.get("game_depth", 0) >= 11:
+                self.profile_data["banked_kibbles"] = int(self.profile_data.get("banked_kibbles", 0)) + 30
+                self.save_profile()
+                self.show_kibble_unlock_toast(30, "Banked +30 kibbles!")
+            if prior_max_depth < 12 and stats.get("game_depth", 0) >= 12:
+                self.profile_data["banked_kibbles"] = int(self.profile_data.get("banked_kibbles", 0)) + 30
+                self.save_profile()
+                self.show_kibble_unlock_toast(30, "Banked +30 kibbles!")
+        leader_score = max((p.total_score for p in self.players), default=0.0)
+        for player in self.players:
+            player.temp_dog_cards.clear()
+            if player.total_score < leader_score:
+                player.kibbles += 8
+        self.end_game_active = False
+        self.end_game_frame.pack_forget()
+        self.show_table_frames()
+        if not self.top_area.winfo_ismapped():
+            self.top_area.pack(fill="x", pady=(0, self.get_roll_section_pady()))
+        if not self.hand_frame.winfo_ismapped():
+            self.hand_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.controls_frame.winfo_ismapped():
+            self.controls_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        if not self.cat_frame.winfo_ismapped():
+            self.cat_frame.pack(fill="x", pady=self.get_roll_section_pady())
+        self.game_layout_active = True
+        self.round_history = []
+        self.scores_this_round = []
+        self.bonus_points_by_player = {p.name: {} for p in self.players}
+        self.pending_cat_sale = None
+        self.pummeling_active = False
+        self.pummeling_player = None
+        self.pummeling_card = None
+        self.lioncut_active = False
+        self.lioncut_player = None
+        self.lioncut_card = None
+        self.squirrel_active = False
+        self.squirrel_player = None
+        self.squirrel_card = None
+        self.schrodinger_pending = None
+        self.schrodinger_resolution = None
+        self.thief_night_active = False
+        self.thief_night_player = None
+        self.thief_night_card = None
+        for player in self.players:
+            player.total_score = 0.0
+            player.pending_extra_rerolls = 0
+            player.pending_roll_bonus = 0
+            player.pending_nimble_dice = 0
+            player.turn_nimble_dice = 0
+            player.free_dog_claims = 0
+            player.free_cat_claims = 0
+            player.pending_roll_penalty = 0
+            player.pending_roll_penalty_round = 0
+            player.pending_reroll_block = False
+            player.pending_reroll_block_round = 0
+            player.pending_grudge_bonus = 0
+            player.starlight_round = 0
+            player.rerolls_blocked = False
+            player.shadow_dawg_triggered_round = 0
+            player.bull_dawg_triggered_round = 0
+            player.blocked_dog_card = None
+            player.blocked_dog_round = 0
+            player.blocked_dog_active = False
+        self.game = Game(
+            self.players,
+            max_cat_cards=self.max_cat_var.get(),
+            max_dog_cards=self.max_dog_var.get(),
+        )
+        self.apply_profile_card_gating()
+        self.remove_cards_in_play_from_decks()
+        self.start_round()
+
+    def remove_cards_in_play_from_decks(self) -> None:
+        if not self.game:
+            return
+        cat_remove = []
+        dog_remove = []
+        for player in self.players:
+            cat_remove.extend(player.cat_cards)
+            dog_remove.extend(player.dog_cards)
+            dog_remove.extend(player.stolen_dog_cards)
+        for card in cat_remove:
+            for deck_list in (self.game.cat_deck._base, self.game.cat_deck._cards):
+                for idx, deck_card in enumerate(deck_list):
+                    if deck_card.name == card.name and deck_card.kind == card.kind:
+                        deck_list.pop(idx)
+                        break
+        for card in dog_remove:
+            for deck_list in (self.game.dog_deck._base, self.game.dog_deck._cards):
+                for idx, deck_card in enumerate(deck_list):
+                    if deck_card.name == card.name and deck_card.kind == card.kind:
+                        deck_list.pop(idx)
+                        break
+
+    def compute_bonus_breakdown(self, player: Player, result) -> dict:
+        dice = result.dice
+        if not dice:
+            return {}
+        dog_cards = player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards
+        color_counts = {}
+        for d in dice:
+            color = self.effective_die_color(d, player)
+            color_counts[color] = color_counts.get(color, 0) + 1
+        objective_color = player.objective_color
+        if objective_color:
+            objective_bonus = sum(
+                1
+                for d in dice
+                if self.effective_die_color(d, player) in (objective_color, "purple")
+            )
+        else:
+            objective_bonus = 0
+        pairs = sum(1 for count in color_counts.values() if count == 2)
+        solitary = sum(1 for count in color_counts.values() if count == 1)
+        all_same = result.all_same_color
+        name = result.name
+        breakdown = {}
+        if objective_bonus:
+            breakdown["Objective Bonus"] = breakdown.get("Objective Bonus", 0) + objective_bonus
+        if all_same:
+            breakdown["All Same Color"] = breakdown.get("All Same Color", 0) + 1
+        for card in dog_cards:
+            if card.name == "Psychedelic Dawg":
+                breakdown[card.name] = breakdown.get(card.name, 0) + color_counts.get("purple", 0)
+            elif card.name == "Lake Dawg":
+                breakdown[card.name] = breakdown.get(card.name, 0) + color_counts.get("blue", 0)
+            elif card.name == "Grass Dawg":
+                breakdown[card.name] = breakdown.get(card.name, 0) + color_counts.get("green", 0)
+            elif card.name == "Scaredy Dawg":
+                breakdown[card.name] = breakdown.get(card.name, 0) + color_counts.get("yellow", 0)
+            elif card.name == "Fire Dawg":
+                breakdown[card.name] = breakdown.get(card.name, 0) + color_counts.get("red", 0)
+            elif card.name == "Reservoir Dawgs":
+                if "Large straight" in name:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 1
+            elif card.name == "Big Dawg Energy":
+                if "straight" in name:
+                    dawg_count = sum(
+                        1
+                        for c in dog_cards
+                        if c.name == "Big Dawg Energy"
+                    )
+                    if dawg_count > 1:
+                        straight_base = 5 if ("Large straight" in name or "as large" in name) else 3
+                        bonus = straight_base * (dawg_count - 1)
+                        breakdown[card.name] = breakdown.get(card.name, 0) + bonus
+            elif card.name == "Who Let the Dawgs Out?":
+                if all_same:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 2
+            elif card.name == "4 Shot Saluki":
+                if "Four of a kind" in name or "Five of a kind" in name:
+                    saluki_count = sum(
+                        1
+                        for c in dog_cards
+                        if c.name == "4 Shot Saluki"
+                    )
+                    if saluki_count > 1:
+                        base = 8 if "Five of a kind" in name else 6
+                        bonus = base * (saluki_count - 1)
+                        breakdown[card.name] = breakdown.get(card.name, 0) + bonus
+            elif card.name == "Dawg House":
+                if "Full house" in name:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 1
+            elif card.name == "One Dawg Wolf Pack":
+                if solitary:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + solitary
+            elif card.name == "Snuggle Buddies":
+                if pairs:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + (pairs * 2)
+            elif card.name in ("Barrel Dawg", "Barrel Dog"):
+                if name == "Pair":
+                    breakdown["Barrel Dawg"] = breakdown.get("Barrel Dawg", 0) + 1
+            elif card.name == "Tri-tail Dawg":
+                if name == "Three of a kind":
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 1
+            elif card.name == "Service Dawg":
+                if name == "No score":
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 8
+            elif card.name == "Diamond Dawg":
+                if "Five of a kind" in name:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 1
+            elif card.name == "Mythic Dawg":
+                if "Four of a kind" in name or "Five of a kind" in name:
+                    if "Five of a kind" in name or "as five" in name:
+                        base = 8
+                    else:
+                        base = 6
+                    breakdown[card.name] = breakdown.get(card.name, 0) + base
+            elif card.name == "Big Dawg Energy":
+                if "Small straight (as large)" in name:
+                    breakdown[card.name] = breakdown.get(card.name, 0) + 1
+        breakdown = {k: v for k, v in breakdown.items() if v > 0}
+        return breakdown
+
+    def build_bonus_list(self, player: Player, breakdown: dict) -> list:
+        if not breakdown:
+            return []
+        counts = {}
+        for card in player.dog_cards + player.stolen_dog_cards + player.temp_dog_cards:
+            counts[card.name] = counts.get(card.name, 0) + 1
+        items = []
+        for name, points in sorted(breakdown.items()):
+            items.append(
+                {
+                    "name": name,
+                    "points": points,
+                    "count": counts.get(name, 1),
+                }
+            )
+        return items
+
+    def format_bonus_list(self, bonuses: list) -> str:
+        parts = []
+        for item in bonuses:
+            name = item.get("name", "")
+            points = item.get("points", 0)
+            count = item.get("count", 1)
+            label = f"{name} x{count}" if count > 1 else name
+            parts.append(f"{label} (+{points})")
+        return ", ".join(parts)
+
+    def base_points_for_hand(self, name: str) -> int:
+        if not name:
+            return 0
+        lower = name.lower()
+        if "five of a kind" in lower:
+            return 5
+        if "four of a kind" in lower:
+            return 4
+        if "large straight" in lower:
+            return 4
+        if "small straight" in lower:
+            return 3
+        if "full house" in lower:
+            return 3
+        if "three of a kind" in lower:
+            return 2
+        if "two pair" in lower:
+            return 2
+        if "pair" in lower:
+            return 1
+        return 0
+
+    def is_new_game_plus_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 1
+
+    def is_new_game_plus2_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 2
+
+    def is_new_game_plus3_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 3
+
+    def is_new_game_plus4_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 4
+
+    def is_new_game_plus5_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 5
+
+    def is_new_game_plus6_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 6
+
+    def is_new_game_plus7_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 7
+
+    def is_new_game_plus8_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 8
+
+    def is_new_game_plus9_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 9
+
+    def is_new_game_plus10_unlocked(self) -> bool:
+        if not self.profile_data:
+            return False
+        stats = self.profile_data.get("stats", {})
+        return stats.get("game_depth", 0) >= 10
+
+    def apply_profile_card_gating(self) -> None:
+        if not self.game:
+            return
+        locked_cats = set()
+        locked_dogs = set()
+        if not self.is_new_game_plus_unlocked():
+            locked_cats.add("Feral Cat")
+            locked_dogs.add("Psychedelic Dawg")
+        if not self.is_new_game_plus2_unlocked():
+            locked_dogs.add("Daredevil Dawg")
+        if not self.is_new_game_plus3_unlocked():
+            locked_cats.add("Squirrel Cat")
+        if not self.is_new_game_plus4_unlocked():
+            locked_dogs.add("Where's Rufus")
+        if not self.is_new_game_plus5_unlocked():
+            locked_cats.add("Shrodinger's Cat")
+        if not self.is_new_game_plus6_unlocked():
+            locked_dogs.add("Grudge Dawg")
+        if not self.is_new_game_plus7_unlocked():
+            locked_cats.add("Thief in the Night")
+        if not self.is_new_game_plus8_unlocked():
+            locked_dogs.add("Mythic Dawg")
+        if not self.is_new_game_plus9_unlocked():
+            locked_cats.add("Devil Cat")
+        if not self.is_new_game_plus10_unlocked():
+            locked_cats.add("Starlight Cat")
+        booster_gates = self.get_booster_gates()
+        unlocked = self.get_unlocked_cards()
+        for key, gates in booster_gates.items():
+            if not self.is_booster_owned(key):
+                locked_cats.update(gates.get("cats", set()))
+                locked_dogs.update(gates.get("dogs", set()))
+        locked_cats -= unlocked.get("cat", set())
+        locked_dogs -= unlocked.get("dog", set())
+        for deck_list in (self.game.cat_deck._base, self.game.cat_deck._cards):
+            deck_list[:] = [c for c in deck_list if c.name not in locked_cats]
+        for deck_list in (self.game.dog_deck._base, self.game.dog_deck._cards):
+            deck_list[:] = [c for c in deck_list if c.name not in locked_dogs]
+
+    def get_rulebook_text(self) -> str:
+        return (
+            "Cats Dogs and Dice - Rulebook\n"
+            "\n"
+            "Setup\n"
+            "- 4 players, clockwise order.\n"
+            "- Each player starts with 20 dice: 5 red, 5 blue, 5 yellow, 5 green.\n"
+            "- Each player gets a unique objective color.\n"
+            "- Roll who goes first (highest roll starts, reroll ties).\n"
+            "- Play 9 rounds.\n"
+            "- New Game+ is only available if the human player finishes 1st after 9 rounds.\n"
+            "- New Game+2 unlocks Daredevil Dawg.\n"
+            "- New Game+3 unlocks Squirrel Cat.\n"
+            "- New Game+4 unlocks Where's Rufus.\n"
+            "- New Game+5 unlocks Shrodinger's Cat.\n"
+            "- New Game+6 unlocks Grudge Dawg.\n"
+            "- New Game+7 unlocks Thief in the Night.\n"
+            "- New Game+8 unlocks Mythic Dawg.\n"
+            "- New Game+9 unlocks Devil Cat.\n"
+            "- New Game+10 unlocks Starlight Cat.\n"
+            "\n"
+            "Turn Flow (Roll Phase)\n"
+            "- Draw 5 dice from your bag and roll them.\n"
+            "- You may reroll up to 2 times (cards can add more).\n"
+            "- To reroll: select any dice to set aside, then draw the same number\n"
+            "  from your bag and roll them.\n"
+            "- Rerolled dice do not return to the bag until the turn ends.\n"
+            "- If Momma Cat is used, you roll +2 dice (stackable twice, max 9).\n"
+            "\n"
+            "Scoring\n"
+            "- Choose the best 5-dice hand from the dice still in your hand.\n"
+            "- Set-aside dice are out of scoring contention.\n"
+            "- Only the highest scoring combination counts.\n"
+            "- Pair: 1 point\n"
+            "- Two Pair (only, not a full house): 2 points\n"
+            "- Three of a Kind: 2 points\n"
+            "- Full House: 3 points\n"
+            "- Small Straight: 3 points\n"
+            "- Large Straight: 5 points\n"
+            "- Four of a Kind: 6 points\n"
+            "- Five of a Kind: 8 points\n"
+            "- All 5 dice same color (in scoring hand): +1 point\n"
+            "\n"
+            "Round Payouts (Kibbles)\n"
+            "- 1st place: 4 kibbles (each tied player gets full reward).\n"
+            "- 2nd place: 3 kibbles (each tied player gets full reward).\n"
+            "- 3rd place: 2 kibbles.\n"
+            "- 4th place: 2 kibbles.\n"
+            "\n"
+            "Shop Phase (after each round)\n"
+            "- Reveal 2 cat cards and 3 dog cards.\n"
+            "- Cat cards cost 2 kibbles, dog cards cost 4.\n"
+            "- Each player may buy cards in turn. Bought cards are replaced.\n"
+            "- Each player may buy up to 3 cards per shop phase.\n"
+            "- Click the cat or dog deck to pay 1 kibble and refresh that row.\n"
+            "- Non-shop-usable cat cards can be sold for 1 kibble.\n"
+            "- You may hold up to 2 cat cards and 5 dog cards (defaults; options may change).\n"
+            "\n"
+            "Banked Kibbles & Card Shop\n"
+            "- After 9 rounds, you can bank any amount of your remaining kibbles.\n"
+            "- Banked kibbles are saved to your profile.\n"
+            "- The Card Shop (main menu) lets you spend banked kibbles to unlock cards.\n"
+            "- Booster packs cost 75 banked kibbles; single cards cost 15.\n"
+            "\n"
+            "Cat Cards (use when you choose)\n"
+            "- Cat Burglar: select a dog card from an AI player to steal.\n"
+            "- Regal Cat: double current kibbles (gain capped at +6).\n"
+            "- Lap Cat: +1 reroll this turn.\n"
+            "- Momma Cat: +2 dice this turn (stackable twice, max 9).\n"
+            "- Feral Cat (New Game+ unlock): convert 1 die in your bag to purple.\n"
+            "- Nimble Cat: reroll up to 2 dice without discarding.\n"
+            "- Bat Cat: discard 1 or 2 dice from your bag of your choice.\n"
+            "- Stray Cat: draft 2 dice of any color from the Dice Bank.\n"
+            "- Fish Bone Cat: add 1 purple die to your bag.\n"
+            "- Pummeling Puma: target player cannot reroll next round (Momma Cat still works).\n"
+            "- Void Cat: steal a cat card from another player's inventory.\n"
+            "- Lion Cut Cat: move one of your dog cards to stolen dogs.\n"
+            "- Territorial Cat: block 1 opponent dog card next round.\n"
+            "- Dogs Best Friend: copy a dog card's effects for this round (stacks, expires end of round).\n"
+            "- Cat Tackle: draft 2 dice for another player from the Dice Bank.\n"
+            "- Raccoon Cat: steal up to 2 kibbles from another player.\n"
+            "- Focus Cat: change one die in your hand to your objective color this round.\n"
+            "- Narc Cat: remove 1 purple die from an AI opponent's bag (not usable in shop).\n"
+            "- Greedy Cat: target player rolls 1 fewer die next round (stacks).\n"
+            "- Squirrel Cat (New Game+3 unlock): add 4 random dice to another player's bag.\n"
+            "- Shrodinger's Cat (New Game+5 unlock): reroll your scoring hand and keep the higher scoring result.\n"
+            "- Thief in the Night (New Game+7 unlock): steal any cat/dog card from any player and bank 3 kibbles.\n"
+            "- Devil Cat (New Game+9 unlock): reroll up to 3 dice to 6 for free this turn.\n"
+            "- Starlight Cat (New Game+10 unlock): purple dice become wild values this round.\n"
+            "- Present Cat: gain 4 kibbles instantly.\n"
+            "- Tolerant Cat: buy 1 dog card for free this shop.\n"
+            "\n"
+            "Objectives\n"
+            "- Each scoring die matching your objective color scores +1.\n"
+            "\n"
+            "Dog Cards (always-on)\n"
+            "- All dog card effects stack unless stated otherwise.\n"
+            "- Big Dawg Energy: small straight counts as large; extra copies add the base straight score again.\n"
+            "- Barrel Dawg: one pair gains +1 point.\n"
+            "- Tri-tail Dawg: three of a kind +1 point.\n"
+            "- Service Dawg: zero-score hand gains 8 points.\n"
+            "- Bull Dawg: if you reroll all dice, gain +1 reroll this round.\n"
+            "- Alpha Dawg: dog cards cost 1 less kibble (stacks).\n"
+            "- Golden Dawg: shop purchase limit +1 per copy.\n"
+            "- Scurvy Dawg: if you score 0, gain +2 kibbles.\n"
+            "- Pit Baws (secret): forces a zero-scoring hand while active (synergy with Service/Scurvy). Appears in the human shop only if you own Service Dawg + Scurvy Dawg.\n"
+            "- Shadow Dawg: if an opponent uses a cat card this round, gain +1 reroll next round.\n"
+            "- Mascot Dawg: if you are not the round leader, gain +2 kibbles.\n"
+            "- Cats Best Friend: increase cat limit by +1.\n"
+            "- Psychedelic Dawg (New Game+ unlock): purple dice +1 each.\n"
+            "- Daredevil Dawg (New Game+2 unlock): doubles all +1 dog boosts; 1-in-4 chance to return to deck after round.\n"
+            "- Where's Rufus (New Game+4 unlock): first roll each round includes at least 1 objective die per copy.\n"
+            "- Grudge Dawg (New Game+6 unlock): if you are stolen from, gain +6 to your round score (per theft).\n"
+            "- Mythic Dawg (New Game+8 unlock): if you score 4-of-a-kind or better, double the base hand score.\n"
+            "- Reservoir Dawgs: large straight +1 point (stacks).\n"
+            "- Who Let the Dawgs Out?: all same color +2 points.\n"
+            "- 4 Shot Saluki: four of a kind counts as five; extra copies add the base hand score again.\n"
+            "- Dawg House: full house +1 point (stacks).\n"
+            "- One Dawg Wolf Pack: each solitary color +1 point.\n"
+            "- Best Buddies: all same color +2 kibbles.\n"
+            "- Snuggle Buddies: each color pair +2 points.\n"
+            "- Diamond Dawg: five of a kind +1 point.\n"
+            "- Goodest Dawg: if you finish 3rd or 4th, gain +2 kibbles per copy.\n"
+            "- Street Dawg: if you are not the overall score leader, gain up to +5 points per copy, but you can only tie the leader (no surpassing).\n"
+            "- Stolen Dogs: separate from your dog limit and always active.\n"
+            "\n"
+            "Purple Dice\n"
+            "- Purple dice are wild for color only (value is fixed).\n"
+            "- Purple still counts for purple bonuses.\n"
+            "\n"
+            "Stolen Dogs\n"
+            "- Stolen dogs are held separately and do not count toward the dog limit.\n"
+            "- Stolen dogs always apply their effects.\n"
+            "\n"
+            "Win Condition\n"
+            "- After 9 rounds, the highest cumulative score wins.\n"
+        )
+
+    def apply_momma_cat(self, player: Player, uses: int = 1) -> list[int]:
+        game = self.game
+        if not game:
+            return []
+        current_total = len(game.current_hand) + len(game.set_aside)
+        if uses <= 0:
+            return []
+        to_add = min(2 * uses, 9 - current_total)
+        if to_add <= 0:
+            return []
+        start_index = len(game.current_hand)
+        colors = player.bag.draw(to_add)
+        for color in colors:
+            game.current_hand.append(Die(color, random.randint(1, 6)))
+        return list(range(start_index, start_index + len(colors)))
+
+    def render_cat_replace_prompt(self) -> None:
+        if not self.pending_cat_purchase:
+            return
+        player = self.pending_cat_purchase["player"]
+        parent = self.shop_body_inner or self.shop_frame
+        for widget in parent.winfo_children():
+            if getattr(widget, "_replace_prompt", False):
+                widget.destroy()
+        prompt = tk.Frame(parent, bg=self.theme["shop_bg"])
+        prompt._replace_prompt = True
+        prompt.grid(row=3, column=0, sticky="ew", pady=5)
+        parent.grid_rowconfigure(3, weight=0)
+        tk.Label(
+            prompt,
+            text="Inventory full: click one of your cat cards to dismiss it.",
+            font=self.theme["body_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w")
+        tk.Label(
+            prompt,
+            text=f"Your cats: {', '.join(c.name for c in player.cat_cards) or 'None'}",
+            font=self.theme["small_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["muted"],
+        ).pack(anchor="w", pady=(2, 0))
+        cancel_img = None
+        if not hasattr(self, "profile_action_images"):
+            self.profile_action_images = self.load_profile_action_images()
+        if self.profile_action_images:
+            cancel_img = self.profile_action_images.get("back") or self.profile_action_images.get("no")
+        if cancel_img:
+            cancel_btn = tk.Button(
+                prompt,
+                image=cancel_img,
+                command=self.cancel_cat_replace,
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            cancel_btn.image = cancel_img
+        else:
+            cancel_btn = tk.Button(
+                prompt,
+                text="Cancel",
+                command=self.cancel_cat_replace,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        cancel_btn.pack(anchor="w", pady=1)
+
+    def dismiss_cat_for_purchase(self, replace_card: Card) -> None:
+        game = self.game
+        if not game or not self.pending_cat_purchase:
+            return
+        player = self.pending_cat_purchase["player"]
+        card = self.pending_cat_purchase["card"]
+        index = self.pending_cat_purchase["index"]
+        kind = self.pending_cat_purchase["kind"]
+        if not game.buy_card(player, card, replace_cat=replace_card):
+            self.add_log("Cannot buy this card (cost or limits).")
+            self.pending_cat_purchase = None
+            self.show_shop()
+            return
+        self.record_shop_collection(player, card)
+        if kind == "cat":
+            game.shop_cats[index] = game.draw_cat()
+            if game.shop_cats[index]:
+                self.shop_flip_targets.add(("cat", index))
+        self.pending_cat_purchase = None
+        self.update_table_view()
+        self.show_shop()
+
+    def confirm_dismiss_cat_from_inventory(self, card: Card) -> None:
+        if not self.pending_cat_purchase:
+            return
+        player = self.pending_cat_purchase["player"]
+        if card not in player.cat_cards:
+            return
+        self.dismiss_cat_for_purchase(card)
+
+    def cancel_cat_replace(self) -> None:
+        self.clear_shop_pending_purchases()
+        self.show_shop()
+
+    def render_dog_replace_prompt(self) -> None:
+        if not self.pending_dog_purchase:
+            return
+        player = self.pending_dog_purchase["player"]
+        parent = self.shop_body_inner or self.shop_frame
+        for widget in parent.winfo_children():
+            if getattr(widget, "_replace_prompt", False):
+                widget.destroy()
+        prompt = tk.Frame(parent, bg=self.theme["shop_bg"])
+        prompt._replace_prompt = True
+        prompt.grid(row=3, column=0, sticky="ew", pady=5)
+        parent.grid_rowconfigure(3, weight=0)
+        tk.Label(
+            prompt,
+            text="Inventory full: click one of your dog cards to dismiss it.",
+            font=self.theme["body_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["text"],
+        ).pack(anchor="w")
+        tk.Label(
+            prompt,
+            text=f"Your dogs: {', '.join(c.name for c in player.dog_cards) or 'None'}",
+            font=self.theme["small_font"],
+            bg=self.theme["shop_bg"],
+            fg=self.theme["muted"],
+        ).pack(anchor="w", pady=(2, 0))
+        cancel_img = None
+        if not hasattr(self, "profile_action_images"):
+            self.profile_action_images = self.load_profile_action_images()
+        if self.profile_action_images:
+            cancel_img = self.profile_action_images.get("back") or self.profile_action_images.get("no")
+        if cancel_img:
+            cancel_btn = tk.Button(
+                prompt,
+                image=cancel_img,
+                command=self.cancel_dog_replace,
+                bg=self.theme["shop_bg"],
+                activebackground=self.theme["shop_bg"],
+                relief="flat",
+                borderwidth=0,
+                padx=8,
+                pady=2,
+            )
+            cancel_btn.image = cancel_img
+        else:
+            cancel_btn = tk.Button(
+                prompt,
+                text="Cancel",
+                command=self.cancel_dog_replace,
+                font=self.theme["body_font"],
+                bg=self.theme["btn"],
+                fg=self.theme["btn_text"],
+                activebackground=self.theme["btn_active"],
+                relief="flat",
+                padx=8,
+                pady=2,
+            )
+        cancel_btn.pack(anchor="w", pady=1)
+
+    def dismiss_dog_for_purchase(self, replace_card: Card) -> None:
+        game = self.game
+        if not game or not self.pending_dog_purchase:
+            return
+        player = self.pending_dog_purchase["player"]
+        card = self.pending_dog_purchase["card"]
+        index = self.pending_dog_purchase["index"]
+        kind = self.pending_dog_purchase["kind"]
+        if not game.buy_card(player, card, replace_dog=replace_card):
+            self.add_log("Cannot buy this card (cost or limits).")
+            self.pending_dog_purchase = None
+            self.show_shop()
+            return
+        self.record_shop_collection(player, card)
+        if card.name == "Pit Baws":
+            self.consume_pit_baws()
+        if kind == "dog":
+            game.shop_dogs[index] = game.draw_dog()
+            if game.shop_dogs[index]:
+                self.shop_flip_targets.add(("dog", index))
+        self.pending_dog_purchase = None
+        self.update_table_view()
+        self.show_shop()
+
+    def confirm_dismiss_dog_from_inventory(self, card: Card) -> None:
+        if not self.pending_dog_purchase:
+            return
+        player = self.pending_dog_purchase["player"]
+        if card not in player.dog_cards:
+            return
+        self.dismiss_dog_for_purchase(card)
+
+    def cancel_dog_replace(self) -> None:
+        self.clear_shop_pending_purchases()
+        self.show_shop()
+
+    def clear_pending_tolerant(self, player: Player) -> None:
+        pending = getattr(player, "pending_tolerant_cards", [])
+        if not pending:
+            return
+        player.free_dog_claims = max(0, player.free_dog_claims - len(pending))
+        player.pending_tolerant_cards = []
+
+    def clear_shop_pending_purchases(self) -> None:
+        if self.pending_dog_purchase:
+            player = self.pending_dog_purchase["player"]
+            self.clear_pending_tolerant(player)
+        self.pending_cat_purchase = None
+        self.pending_dog_purchase = None
+
+    def load_dice_images(self):
+        images = {c: {} for c in COLORS}
+        name_map = {
+            "red": "red",
+            "blue": "Blue",
+            "green": "Green",
+            "yellow": "yellow",
+            "purple": "purple",
+        }
+        for color in COLORS:
+            prefix = name_map.get(color, color)
+            for value in range(1, 7):
+                relative = os.path.join("Assets", "Dice", f"{prefix}-{value}.png")
+                path = self.resource_path(relative)
+                img = self.load_scaled_photo_image(path, self.display_ui_scale * self.roll_asset_scale)
+                if img:
+                    images[color][value] = img
+        return images
+
+    def load_scaled_photo_image(
+        self,
+        path: str,
+        scale: float = 1.0,
+        force_rgba: bool = True,
+    ) -> tk.PhotoImage | None:
+        try:
+            if Image and ImageTk:
+                pil_img = Image.open(path)
+                if force_rgba:
+                    pil_img = pil_img.convert("RGBA")
+                if abs(scale - 1.0) > 0.01:
+                    new_w = max(1, int(round(pil_img.width * scale)))
+                    new_h = max(1, int(round(pil_img.height * scale)))
+                    pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                return ImageTk.PhotoImage(pil_img)
+            img = tk.PhotoImage(file=path)
+            if abs(scale - 1.0) > 0.01:
+                img = self.scale_image_percent(img, scale)
+            return img
+        except (tk.TclError, OSError):
+            return None
+
+    def load_purple_wild_image(self) -> tk.PhotoImage | None:
+        path = self.resource_path(os.path.join("Assets", "Dice", "purple-w.png"))
+        img = self.load_scaled_photo_image(path, self.display_ui_scale * self.roll_asset_scale)
+        if not img:
+            return None
+        sample = None
+        if self.dice_images.get("purple"):
+            sample = next(iter(self.dice_images["purple"].values()), None)
+        if sample:
+            max_dim = max(sample.width(), sample.height())
+            img = self.scale_image_to_max(img, max_dim)
+        return img
+
+    def load_kibble_images(self) -> dict:
+        values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30]
+        images = {}
+        for val in values:
+            relative = os.path.join("Assets", "Kibble", f"kibble_{val}.png")
+            path = self.resource_path(relative)
+            try:
+                img = tk.PhotoImage(file=path)
+                images[val] = self.scale_image_percent(img, self.scale_ui_percent(0.25))
+            except tk.TclError:
+                continue
+        return images
+
+    def scale_image_percent(self, img: tk.PhotoImage, percent: float) -> tk.PhotoImage:
+        if percent <= 0:
+            return img
+        if percent >= 1:
+            scale = max(1, int(round(percent)))
+            return img.zoom(scale, scale)
+        scale = max(1, int(round(1 / percent)))
+        return img.subsample(scale, scale)
+
+    def scale_image_to_max(self, img: tk.PhotoImage, max_dim: int) -> tk.PhotoImage:
+        if max_dim <= 0:
+            return img
+        current = max(img.width(), img.height())
+        if current <= max_dim:
+            return img
+        factor = max(1, (current + max_dim - 1) // max_dim)
+        return img.subsample(factor, factor)
+
+    def load_cat_deck_image(self) -> tk.PhotoImage | None:
+        path = self.resource_path(os.path.join("Assets", "Cards", "Decks", "CatCards_Deck.png"))
+        try:
+            img = tk.PhotoImage(file=path)
+            return self.scale_image_to_max(img, self.shop_card_dim)
+        except tk.TclError:
+            return None
+
+    def load_dog_deck_image(self) -> tk.PhotoImage | None:
+        path = self.resource_path(os.path.join("Assets", "Cards", "Decks", "DogCards_Deck.png"))
+        try:
+            img = tk.PhotoImage(file=path)
+            return self.scale_image_to_max(img, self.shop_card_dim)
+        except tk.TclError:
+            return None
+
+    def get_kibble_image(self, kibbles: float) -> tk.PhotoImage | None:
+        if not self.kibble_images:
+            return None
+        count = max(0, int(kibbles))
+        if count <= 0:
+            return None
+        if count >= 30:
+            key = 30
+        elif count >= 20:
+            key = 20
+        elif count >= 15:
+            key = 15
+        elif count >= 10:
+            key = 10
+        else:
+            key = max(1, count)
+        return self.kibble_images.get(key)
+
+    def load_bag_image(self):
+        path = self.resource_path(os.path.join("Assets", "Bag", "DiceBag.png"))
+        return self.load_scaled_photo_image(path, self.display_ui_scale)
+
+    def scale_dice_images(self, images: dict, factor: int = 2) -> dict:
+        scaled: dict[str, dict[int, tk.PhotoImage]] = {}
+        if factor <= 1:
+            return images
+        for color, faces in images.items():
+            scaled[color] = {}
+            for value, img in faces.items():
+                if img:
+                    scaled[color][value] = img.subsample(factor, factor)
+        return scaled
+
+    def load_team_jibby_image(self):
+        path = self.resource_path(os.path.join("Assets", "Splash", "Team_Jibby.png"))
+        try:
+            return tk.PhotoImage(file=path)
+        except tk.TclError:
+            return None
+
+    def load_title_splash_image(self):
+        path = self.resource_path(os.path.join("Assets", "Splash", "title_splash.png"))
+        try:
+            return tk.PhotoImage(file=path)
+        except tk.TclError:
+            return None
+
+    def load_app_icon(self):
+        path = self.resource_path(os.path.join("Assets", "UI", "icon.png"))
+        try:
+            return tk.PhotoImage(file=path)
+        except tk.TclError:
+            return None
+
+    def load_ui_images(self) -> dict:
+        files = {
+            "start": "start.png",
+            "options": "options.png",
+            "rulebook": "rulebook.png",
+            "manage_profiles": "manage_profiles.png",
+            "exit_game": "exit_game.png",
+            "back": "back.png",
+            "game_tab": "game.png",
+            "audio_tab": "audio.png",
+            "video_tab": "video.png",
+            "default": "default.png",
+            "player_setup": "playersetup.png",
+            "start_game": "startgame.png",
+            "reroll": "reroll.png",
+            "score_turn": "scoreturn.png",
+            "sort": "sort.png",
+            "player1": "player1.png",
+            "player2": "player2.png",
+            "player3": "player3.png",
+            "player4": "player4.png",
+            "roll_title": "rolltitle.png",
+            "scorecard": "scorecard.png",
+            "view_bag": "viewbag.png",
+            "done_shopping": "doneshopping.png",
+            "roll": "roll.png",
+            "nimble_roll": "nimbleroll.png",
+            "plus": "plus.png",
+            "steal_selected": "steal_selected.png",
+            "cancel": "cancel.png",
+            "close": "close.png",
+            "left": "left.png",
+            "right": "right.png",
+            "lock": "lock.png",
+            "view_hands": "viewhands.png",
+            "hide_hands": "hidehands.png",
+            "esc": "esc.png",
+            "exit": "exit_game.png",
+            "achievements": "achievements.png",
+            "card_shop": "card_shop.png",
+            "personal_collection": "personal_collection.png",
+            "rivalry_booster": "rivalry_booster.png",
+            "service_booster": "service_booster.png",
+            "trickster_booster": "trickster_booster.png",
+            "convert": "convert.png",
+            "discard": "discard.png",
+            "draft": "draft.png",
+            "reset": "reset.png",
+            "return_to_title": "returntotitle.png",
+            "new_game": "newgame.png",
+            "results": "results.png",
+            "rank_1": "1st.png",
+            "rank_2": "2nd.png",
+            "rank_3": "3rd.png",
+            "rank_4": "4th.png",
+            "title": "title.png",
+            "bank_all": "bank_all.png",
+            "bank_none": "bank_none.png",
+            "continue": "continue.png",
+            "slider_track": "slider.png",
+            "slider_knob": "knob.png",
+            "aihand": "aihand.png",
+            "waste": "waste.png",
+        }
+        images = {}
+        for key, filename in files.items():
+            path = self.resource_path(os.path.join("Assets", "UI", filename))
+            img = None
+            if key in ("aihand", "waste") and Image and ImageTk:
+                try:
+                    pil_img = Image.open(path).convert("RGBA")
+                    if key == "aihand":
+                        alpha = pil_img.split()[3]
+                        alpha = alpha.point(lambda p: int(p * 0.8))
+                        pil_img.putalpha(alpha)
+                    scale = self.scale_ui_percent(0.25)
+                    if key == "waste":
+                        scale *= self.roll_asset_scale
+                    if scale != 1.0:
+                        new_w = max(1, int(pil_img.width * scale))
+                        new_h = max(1, int(pil_img.height * scale))
+                        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                    img = ImageTk.PhotoImage(pil_img)
+                except Exception:
+                    img = None
+            if key == "roll_border" and Image and ImageTk:
+                try:
+                    pil_img = Image.open(path).convert("RGBA")
+                    center_x = max(0, pil_img.width // 2)
+                    center_y = max(0, pil_img.height // 2)
+                    bg = pil_img.getpixel((center_x, center_y))[:3]
+                    tol = 8
+                    pixels = pil_img.getdata()
+                    new_pixels = []
+                    for r, g, b, a in pixels:
+                        if (
+                            abs(r - bg[0]) <= tol
+                            and abs(g - bg[1]) <= tol
+                            and abs(b - bg[2]) <= tol
+                        ):
+                            new_pixels.append((r, g, b, 0))
+                        else:
+                            new_pixels.append((r, g, b, a))
+                    pil_img.putdata(new_pixels)
+                    self.roll_border_pil = pil_img
+                    img = ImageTk.PhotoImage(pil_img)
+                except Exception:
+                    img = None
+            if img is None:
+                try:
+                    img = tk.PhotoImage(file=path)
+                except tk.TclError:
+                    img = None
+            if img:
+                if key not in ("slider_track", "slider_knob", "aihand", "waste", "roll_border"):
+                    img = self.scale_image_percent(img, self.scale_ui_percent(0.25))
+                if key == "scorecard":
+                    img = self.scale_image_percent(img, 0.75)
+                if key in ("scorecard", "view_bag"):
+                    img = self.scale_image_percent(img, 0.5)
+                if key == "esc":
+                    img = self.scale_image_percent(img, 0.5)
+                if key in ("view_hands", "hide_hands"):
+                    img = self.scale_image_percent(img, 0.5)
+                if key in ("back", "options", "achievements", "exit", "discard", "draft", "reset", "close", "cancel"):
+                    img = self.scale_image_percent(img, 0.75)
+                if key in ("card_shop", "personal_collection", "rivalry_booster", "service_booster", "trickster_booster"):
+                    img = self.scale_image_percent(img, 0.85)
+                if key == "lock":
+                    img = self.scale_image_percent(img, 0.75)
+                    img = self.scale_image_percent(img, 0.75)
+            images[key] = img
+        return images
+
+    def load_profile_icon_images(self) -> dict:
+        files = {
+            "ai": "ai.png",
+            "he": "he.png",
+            "they": "they.png",
+        }
+        images = {}
+        for key, filename in files.items():
+            path = self.resource_path(os.path.join("Assets", "UI", filename))
+            try:
+                img = tk.PhotoImage(file=path)
+            except tk.TclError:
+                img = None
+            if img:
+                img = self.scale_image_percent(img, self.scale_ui_percent(0.2))
+            images[key] = img
+        return images
+
+    def load_profile_action_images(self) -> dict:
+        files = {
+            "load": "load.png",
+            "save": "save.png",
+            "delete": "delete.png",
+            "create": "create.png",
+            "back": "back.png",
+            "yes": "yes.png",
+            "no": "no.png",
+        }
+        images = {}
+        for key, filename in files.items():
+            path = self.resource_path(os.path.join("Assets", "UI", filename))
+            try:
+                img = tk.PhotoImage(file=path)
+            except tk.TclError:
+                img = None
+            if img:
+                img = self.scale_image_percent(img, self.scale_ui_percent(0.25))
+                if key in ("back", "yes"):
+                    img = self.scale_image_percent(img, 0.5)
+            images[key] = img
+        return images
+
+    def load_achievement_images(self) -> dict:
+        files = {
+            "Big Dawg": "big_dawg.png",
+            "Veteran Dawg": "veteran_dawg.png",
+            "Royal Swiper": "royal_swiper.png",
+            "Bag of Coin": "bag_of_coin.png",
+            "Bag of Riches": "bag_of_riches.png",
+            "Royal Synergy": "royal_synergy.png",
+            "Smarty Cat": "smarty_cat.png",
+            "Cat from on high": "cat_from_on_high.png",
+            "Rolling": "rolling.png",
+            "Rolling loud": "rolling_loud.png",
+            "Mutli-flavored-schlogy": "multi_flavored_shlogy.png",
+            "Bag of holding": "bag_of_holding.png",
+            "Light Packer": "light_packer.png",
+            "Ultra light packer": "ultra_light_packer.png",
+            "Royal Kibbler": "royal_kibbler.png",
+            "Has cloning gone too far?": "has_cloning_gone_too_far.png",
+            "Grand Poohbah": "grand_poohbah.png",
+        }
+        images = {}
+        for name, filename in files.items():
+            path = self.resource_path(os.path.join("Assets", "Achievements", filename))
+            try:
+                img = tk.PhotoImage(file=path)
+            except tk.TclError:
+                img = None
+            if img:
+                img = self.scale_image_to_max(img, 64)
+            images[name] = img
+        return images
+
+    def load_card_images(self, full_size: bool = False) -> dict:
+        cat_files = {
+            "Cat Burglar": "cat_burglar.png",
+            "Regal Cat": "regal_cat.png",
+            "Lap Cat": "lap_cat.png",
+            "Momma Cat": "momma_cat.png",
+            "Feral Cat": "feral_cat.png",
+            "Nimble Cat": "nimble_cat.png",
+            "Devil Cat": "devil_cat.png",
+            "Starlight Cat": "starlight_cat.png",
+            "Bat Cat": "bat_cat.png",
+            "Stray Cat": "stray_cat.png",
+            "Fish Bone Cat": "fish_bone_cat.png",
+            "Pummeling Puma": "pummeling_puma.png",
+            "Void Cat": "void_cat.png",
+            "Lion Cut Cat": "lioncut_cat.png",
+            "Present Cat": "present_cat.png",
+            "Tolerant Cat": "tolerant_cat.png",
+            "Territorial Cat": "territorial_cat.png",
+            "Dogs Best Friend": "dogs_best_friend.png",
+            "Cat Tackle": "cat_tackle.png",
+            "Raccoon Cat": "raccoon_cat.png",
+            "Focus Cat": "focus_cat.png",
+            "Narc Cat": "narc_cat.png",
+            "Greedy Cat": "greedy_cat.png",
+            "Squirrel Cat": "squirrel_cat.png",
+            "Shrodinger's Cat": "shrodinger_cat.png",
+            "Thief in the Night": "theif_in_the_night.png",
+        }
+        dog_files = {
+            "4 Shot Saluki": "4_shot_saluki.png",
+            "Best Buddies": "best_buddies.png",
+            "Big Dawg Energy": "big_dawg_energy.png",
+            "Barrel Dawg": "barrel_dawg.png",
+            "Barrel Dog": "barrel_dawg.png",
+            "Tri-tail Dawg": "Tritail_dawg.png",
+            "Service Dawg": "service_dawg.png",
+            "Bull Dawg": "bull_dawg.png",
+            "Alpha Dawg": "alpha_dawg.png",
+            "Golden Dawg": "golden_dawg.png",
+            "Scurvy Dawg": "scurvy_dawg.png",
+            "Pit Baws": "pit_baws.png",
+            "Shadow Dawg": "shadow_dog.png",
+            "Mascot Dawg": "mascot_dawg.png",
+            "Cats Best Friend": "cats_best_friend.png",
+            "Dawg House": "dawg_house.png",
+            "Diamond Dawg": "diamond_dawg.png",
+            "Goodest Dawg": "goodest_dawg.png",
+            "One Dawg Wolf Pack": "one_dawg_wolf_pack.png",
+            "Psychedelic Dawg": "psychadelic_dog.png",
+            "Reservoir Dawgs": "reservoir_dawgs.png",
+            "Snuggle Buddies": "snuggle_buddies.png",
+            "Street Dawg": "street_dawg.png",
+            "Who Let the Dawgs Out?": "who_let_the_dawgs_out.png",
+            "Daredevil Dawg": "daredevil_dawg.png",
+            "Where's Rufus": "where_rufus.png",
+            "Grudge Dawg": "grudge_dawg.png",
+            "Mythic Dawg": "mythic_dawg.png",
+        }
+        images = {"cat": {}, "dog": {}}
+        for name, filename in cat_files.items():
+            path = self.resource_path(os.path.join("Assets", "Cards", "Cats", filename))
+            images["cat"][name] = self._load_card_image(path, full_size=full_size)
+        for name, filename in dog_files.items():
+            path = self.resource_path(os.path.join("Assets", "Cards", "Dogs", filename))
+            images["dog"][name] = self._load_card_image(path, full_size=full_size)
+        return images
+
+    def _load_card_image(self, path: str, full_size: bool = False):
+        try:
+            img = tk.PhotoImage(file=path)
+        except tk.TclError:
+            return None
+        if full_size:
+            return img
+        return self.scale_image_to_max(img, self.shop_card_dim)
+
+    def get_card_image(self, card: Card):
+        return self.card_images.get(card.kind, {}).get(card.name)
+
+    def get_picker_card_image(self, card: Card):
+        key = (card.kind, card.name)
+        cached = self.card_images_picker.get(key)
+        if cached is not None:
+            return cached
+        full_img = self.card_images_full.get(card.kind, {}).get(card.name)
+        if full_img:
+            img = self.scale_image_to_max(full_img, self.card_picker_dim)
+        else:
+            img = self.get_card_image(card)
+        self.card_images_picker[key] = img
+        return img
+
+    def get_picker_card_image_gray(self, card: Card):
+        key = (card.kind, card.name)
+        cached = self.card_images_picker_gray.get(key)
+        if cached is not None:
+            return cached
+        base = self.get_picker_card_image(card)
+        if not base:
+            return None
+        gray = self.make_grayscale_image(base)
+        self.card_images_picker_gray[key] = gray
+        return gray
+
+    def find_card_definition(self, name: str, kind: str) -> Card | None:
+        cards = build_cat_cards() if kind == "cat" else build_dog_cards()
+        for card in cards:
+            if card.name == name and card.kind == kind:
+                return card
+        return None
+
+    def attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        Tooltip(widget, text, self.theme)
+
+    def attach_card_tooltip(self, widget: tk.Widget, card: Card) -> None:
+        full_img = self.card_images_full.get(card.kind, {}).get(card.name)
+        if full_img:
+            target = self.shop_card_dim * 4
+            zoomed = self.scale_image_to_max(full_img, target)
+        else:
+            zoomed = None
+        Tooltip(widget, f"{card.name}\n{card.description}", self.theme, image=zoomed)
+
+    def resource_path(self, relative_path: str) -> str:
+        base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+        return os.path.join(base_path, relative_path)
+
+
+if __name__ == "__main__":
+    random.seed()
+    enable_windows_dpi_awareness()
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()

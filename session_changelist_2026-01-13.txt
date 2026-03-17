@@ -1,0 +1,48 @@
+Cats Dogs and Dice - Change List (2026-01-13)
+
+Gameplay rules and scoring
+- Scoring now ignores set-aside dice; only dice remaining in hand count toward the 5-dice hand.
+- Added objective colors; each player gets a unique objective and +1 per die of that color in scoring.
+- Removed Lake/Grass/Scaredy/Fire Dawg cards; objective colors replace their effects.
+- Added Stolen Dogs category (does not count toward dog limit; effects apply).
+- Regal Cat gain capped at +6 (log shows exact gain).
+- Kibble payouts now: 1st=4, 2nd=3, 3rd=2, 4th=2 (full payout on ties).
+- Street Dawg reworked: +5 points if not the score leader (no effect if leading).
+- Goodest Dawg added: +2 kibbles if you finish 3rd/4th.
+- Territorial Cat added: cancels an opponent’s dog effects for the round.
+- Bat Cat now allows discarding 1 or 2 dice.
+
+Shop and card usage
+- Shop purchases capped at 3 per player per shop phase; header shows purchases.
+- Shop cat overlay now manual via “Use Cat Cards”; no auto-open on purchase.
+- Tolerant Cat/Present Cat close overlay and refresh shop when used in shop.
+- Start game no longer grants random dog cards; default starting dog cards set to 0.
+
+AI behavior
+- AI strongly prioritizes objective color and purple bonuses.
+- AI rerolls never discard objective-color dice; later updated to reroll all non-objective dice.
+- AI uses Cat Burglar more readily (lower synergy threshold).
+- AI shop scoring boosts catch-up cards when behind.
+- AI shows reroll selection with a pause before rerolling.
+
+UI/UX
+- Splash screen: Team Jibby image, pre-alpha footer, click-to-skip only, 8s removed.
+- Added second splash screen (title_splash) click-through.
+- Rulebook moved to a separate scrollable window; rulebook text updated to match rules.
+- Dice images load from PyInstaller bundle via resource_path.
+- Bag image shown during “Jumbling bag…” phase.
+- Dice roll animation added (1.5s) for initial reveal and rerolls; animates only rerolled dice.
+- When rerolls are 0, hand auto-sorts and highlights the scoring 5 dice; AI pauses 3s with highlight.
+- Game log now prepends newest entries.
+- Roll-who-goes-first phase added with animated single-die rolls; winners set starting player.
+- Turn order updated to clockwise (right ? bottom ? left ? top ? right).
+
+Bug fixes
+- Fixed PyInstaller dice artwork loading.
+- Fixed duplicate card issue by excluding in-play cards on deck reshuffle.
+- Guarded against Tkinter widget destruction in dice highlight updates.
+- Fixed continue_game crash with unhashable Player set usage.
+
+Files touched
+- app.py
+- game.py

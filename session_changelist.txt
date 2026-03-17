@@ -1,0 +1,47 @@
+Cats Dogs and Dice - Change List (this session)
+
+Core rules and scoring
+- Scoring now ignores set-aside dice; only dice remaining in hand count toward the 5-dice hand (game.py, app.py).
+- Added objective colors: each player gets a unique color objective that grants +1 per die of that color (game.py, app.py).
+- Removed Lake/Grass/Scaredy/Fire Dawg cards from the dog deck; their effects are now handled by objective colors (game.py, app.py rulebook).
+- Added "Stolen Dogs" card bucket that does not count toward the dog limit; stolen dog cards still apply their effects (game.py, app.py).
+
+Shop and card usage
+- Shop cat cards no longer auto-open on purchase; added a "Use Cat Cards" button to open the overlay (app.py).
+- Using Tolerant Cat or Present Cat in the shop now closes the overlay and refreshes the shop immediately (app.py).
+- Prevented cat-card crashes by guarding against missing cards (app.py).
+- Shop view reappears after finishing cat-card subflows (dice bank/bag/cat burglar) by resetting shop layout state (app.py).
+
+Cat card functionality (shop + in-game)
+- Stray Cat opens Dice Bank and allows picking 2 dice; works during shop (app.py).
+- Bat Cat opens bag view to discard 2 dice; works during shop (app.py).
+- Feral Cat opens bag view to convert 1 die to purple (app.py).
+- Nimble Cat rerolls up to 2 dice without discarding, does not consume a reroll (app.py).
+- Momma Cat rolls 9 dice for the turn; resets after (app.py).
+- Lap Cat adds +1 reroll for the current turn (app.py).
+- Present Cat grants +4 kibbles and works in shop (app.py).
+- Tolerant Cat grants a free dog draft and works in shop immediately after purchase (app.py).
+- Cat Burglar supports selection of AI dog cards and now steals into the "Stolen Dogs" bucket (app.py).
+
+UI / layout
+- Added splash screen (4s, click to skip) and centered setup UI (app.py).
+- Rulebook opens in its own window with attached scrollbar; rulebook text updated (app.py).
+- Added options panel behind Options button (fullscreen, starting kibbles, starting dogs, max cat/dog limits) with reset (app.py).
+- Table view displays player objective color and stolen dogs (app.py).
+- Bag view renders dice images with scrollbar only for large bags; dice bank shows random face image for selected color (app.py).
+- Dice images used for all colors; selectable dice show border highlight; dice can be drag-reordered (app.py).
+- Reroll button disables when 0; buttons disabled during shop/dice bank as needed (app.py).
+
+AI behavior
+- AI prioritization logic updated to consider objective color and stolen dog cards (app.py).
+- AI cat card usage covers shop-allowed cards and synergy; Tolerant Cat used in shop (app.py).
+
+Game setup
+- Players no longer start with random dog cards; default starting dog cards reset to 0 (app.py).
+
+Rulebook updates
+- Added objective section; removed old color dog card descriptions; noted stolen dogs (app.py).
+
+Files touched
+- app.py
+- game.py

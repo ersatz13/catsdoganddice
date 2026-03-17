@@ -1,0 +1,9 @@
+- Adjusted shop layout sizing/centering to respond to window resize; added restock behavior for missing cat/dog slots with reshuffle toast + flip sound.
+- Unified card/deck image sizing and added 4x image tooltips; tooltips now clamp inside window and reopen reliably on hover.
+- Added achievement audio on unlock (respecting mute) and upgraded achievement UI to image grid with grayscale for locked.
+- Profile manager: switched profile details to in-panel layout, added achievement icon grid + tooltips, improved list styling and filenames, added save toast, and defaulted min bag size display to 20.
+- Bag view: centered overlay, resized dice images to fit without scrollbars, and improved centering logic; dice bank row layout tightened.
+- Shop: enable selling stolen dogs; prompt toast for dog swap; consistent card click handling; start button label updated.
+- End game: removed Exit button, renamed Replay to Return to Title; added 2x size placement toasts with rainbow for winner.
+- Cards/Rules: updated stacking logic for 4 Shot Saluki, Big Dawg Energy, Street Dawg, Goodest Dawg; rulebook updated to note stacking and Momma Cat limit.
+- Misc: fixed Psychedelic Dawg image mapping; added Momma Cat duplicate warning toast; Nimble Cat now removed after use.
